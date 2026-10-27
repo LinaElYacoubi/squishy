@@ -307,3 +307,4 @@ scripts/setup-assets.mjs    copies the runtime and downloads the model
   camera placement relative to the display.
 - Real fullscreen behaviour, multiple physical cameras, and unplugging a camera while running.
 - Browsers other than Chrome (Edge should behave the same; Firefox and Safari are untested).
+# squishy
