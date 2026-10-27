@@ -1,0 +1,577 @@
+:root {
+  --bg-desktop: radial-gradient(ellipse at 50% 35%, #2a1d3f 0%, #150f22 55%, #0b0812 100%);
+  --text: #fbf3ff;
+  --text-dim: rgba(251, 243, 255, 0.72);
+  --accent: #ff7ad9;
+  --accent-2: #b98bff;
+  --panel-bg: rgba(20, 14, 30, 0.94);
+  --panel-line: rgba(255, 255, 255, 0.14);
+  --font: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  /* Visitor text scales with the display so it stays readable from a distance. */
+  --title-size: clamp(28px, 4.6vmin, 72px);
+  --sub-size: clamp(16px, 2.4vmin, 34px);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #0b0812;
+  color: var(--text);
+  font-family: var(--font);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+html[data-display='desktop'] body {
+  background: var(--bg-desktop);
+}
+
+html[data-display='black'] body {
+  background: #000;
+}
+
+#app {
+  position: fixed;
+  inset: 0;
+}
+
+#stage {
+  position: absolute;
+  inset: 0;
+}
+
+#stage canvas {
+  display: block;
+}
+
+/* Safe-area outline, only shown while the operator panel is open. */
+#safe-frame {
+  position: absolute;
+  border: 2px dashed rgba(255, 122, 217, 0.5);
+  pointer-events: none;
+  display: none;
+}
+
+html.operator-open #safe-frame {
+  display: block;
+}
+
+/* ---------------------------------------------------------------- cursor */
+
+.cursor {
+  --size: clamp(44px, 6.5vmin, 96px);
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--size);
+  height: var(--size);
+  margin: calc(var(--size) / -2) 0 0 calc(var(--size) / -2);
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+  will-change: transform;
+  z-index: 5;
+}
+
+.cursor.is-hidden {
+  opacity: 0;
+}
+
+.cursor-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 4px solid rgba(255, 255, 255, 0.85);
+  box-shadow: 0 0 18px rgba(185, 139, 255, 0.55);
+  transition: transform 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.cursor-dot {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 22%;
+  height: 22%;
+  margin: -11% 0 0 -11%;
+  border-radius: 50%;
+  background: #fff;
+}
+
+/* Over a catchable creature: larger, accent-coloured ring. */
+.cursor.is-over .cursor-ring {
+  transform: scale(1.22);
+  border-color: var(--accent);
+  box-shadow: 0 0 26px rgba(255, 122, 217, 0.8);
+}
+
+/* Pinching: ring closes and fills. */
+.cursor.is-pinching .cursor-ring {
+  transform: scale(0.62);
+  background: rgba(255, 255, 255, 0.85);
+}
+
+.cursor.is-over.is-pinching .cursor-ring {
+  background: var(--accent);
+}
+
+/* Holding food over a mouth: releasing now will feed. */
+.cursor.is-feed .cursor-ring {
+  transform: scale(0.9);
+  border-color: #fff;
+  background: var(--accent);
+  box-shadow: 0 0 34px rgba(255, 122, 217, 0.95);
+}
+
+.snack-hint {
+  position: absolute;
+  left: 0;
+  top: 0;
+  margin: 0;
+  padding: 0.4em 0.9em;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #3a1640;
+  font-weight: 700;
+  font-size: clamp(14px, 2vmin, 28px);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.5s ease;
+  z-index: 3;
+}
+
+.snack-hint.is-visible {
+  opacity: 1;
+}
+
+.cursor.is-catch .cursor-ring {
+  animation: catch-pulse 0.45s ease-out;
+}
+
+@keyframes catch-pulse {
+  0% {
+    transform: scale(0.6);
+  }
+  60% {
+    transform: scale(1.5);
+    border-color: var(--accent);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* ---------------------------------------------------------------- visitor prompt */
+
+.prompt {
+  position: absolute;
+  left: 50%;
+  top: max(4vh, 24px);
+  transform: translateX(-50%);
+  width: min(92vw, 1100px);
+  text-align: center;
+  pointer-events: none;
+  transition: opacity 0.6s ease;
+  z-index: 3;
+}
+
+.prompt.is-hidden {
+  opacity: 0;
+}
+
+.prompt-title {
+  margin: 0;
+  font-size: var(--title-size);
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  text-shadow: 0 2px 18px rgba(0, 0, 0, 0.6);
+}
+
+.prompt-sub {
+  margin: 0.4em 0 0;
+  font-size: var(--sub-size);
+  color: var(--text-dim);
+}
+
+.prompt-sub:empty {
+  display: none;
+}
+
+.pinch-demo {
+  margin: 0.8em auto 0;
+  display: none;
+  width: fit-content;
+}
+
+.prompt.show-demo .pinch-demo {
+  display: block;
+}
+
+.pinch-demo svg {
+  width: clamp(90px, 14vmin, 200px);
+  height: auto;
+  display: block;
+  margin: 0 auto;
+  overflow: visible;
+}
+
+.pinch-demo figcaption {
+  font-size: clamp(13px, 1.7vmin, 24px);
+  color: var(--text-dim);
+  margin-top: 0.2em;
+}
+
+.demo-palm,
+.demo-curl {
+  fill: #3a2a52;
+  stroke: rgba(255, 255, 255, 0.85);
+  stroke-width: 4;
+}
+
+.demo-index line,
+.demo-thumb line {
+  stroke: #fff;
+  stroke-width: 13;
+  stroke-linecap: round;
+}
+
+.demo-index,
+.demo-thumb {
+  transform-box: view-box;
+  animation-duration: 2.2s;
+  animation-iteration-count: infinite;
+  animation-timing-function: ease-in-out;
+}
+
+.demo-index {
+  transform-origin: 40px 48px;
+  animation-name: demo-index;
+}
+
+.demo-thumb {
+  transform-origin: 30px 96px;
+  animation-name: demo-thumb;
+}
+
+.demo-contact {
+  fill: var(--accent);
+  opacity: 0;
+  animation: demo-contact 2.2s ease-in-out infinite;
+}
+
+@keyframes demo-index {
+  0%,
+  25%,
+  100% {
+    transform: rotate(-26deg);
+  }
+  50%,
+  72% {
+    transform: rotate(0deg);
+  }
+}
+
+@keyframes demo-thumb {
+  0%,
+  25%,
+  100% {
+    transform: rotate(26deg);
+  }
+  50%,
+  72% {
+    transform: rotate(0deg);
+  }
+}
+
+@keyframes demo-contact {
+  0%,
+  45%,
+  78%,
+  100% {
+    opacity: 0;
+  }
+  52%,
+  70% {
+    opacity: 0.9;
+  }
+}
+
+.hint,
+.touch-hint {
+  position: absolute;
+  left: 50%;
+  top: max(4vh, 24px);
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 0.45em 1.1em;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.45);
+  font-size: var(--sub-size);
+  color: var(--text);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.5s ease;
+  white-space: nowrap;
+  z-index: 3;
+}
+
+.hint.is-visible,
+.touch-hint.is-visible {
+  opacity: 1;
+}
+
+.touch-hint {
+  top: auto;
+  bottom: 12vh;
+  background: rgba(255, 122, 217, 0.25);
+  white-space: normal;
+  text-align: center;
+  width: max-content;
+  max-width: 90vw;
+}
+
+.privacy-note {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  margin: 0;
+  width: max-content;
+  max-width: 94vw;
+  text-align: center;
+  font-size: clamp(11px, 1.3vmin, 18px);
+  color: rgba(251, 243, 255, 0.5);
+  pointer-events: none;
+  z-index: 2;
+}
+
+html[data-display='black'] .privacy-note {
+  color: rgba(251, 243, 255, 0.38);
+}
+
+.mode-badge {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  margin: 0;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: #ffcc4d;
+  color: #241a00;
+  font-weight: 700;
+  font-size: 14px;
+  z-index: 6;
+}
+
+.fatal {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+  background: #0b0812;
+  z-index: 50;
+}
+
+.fatal[hidden] {
+  display: none;
+}
+
+.fatal-title {
+  font-size: 28px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.fatal-text {
+  max-width: 640px;
+  color: var(--text-dim);
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------- operator panel */
+
+.op-toggle {
+  position: fixed;
+  top: 10px;
+  right: 10px;
+  z-index: 20;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--panel-line);
+  background: rgba(20, 14, 30, 0.5);
+  color: var(--text);
+  opacity: 0.35;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+
+.op-toggle:hover,
+.op-toggle:focus-visible,
+html.operator-open .op-toggle {
+  opacity: 1;
+}
+
+.op-toggle svg {
+  width: 20px;
+  height: 20px;
+}
+
+.op-panel {
+  position: fixed;
+  top: 58px;
+  right: 10px;
+  z-index: 20;
+  width: min(360px, calc(100vw - 20px));
+  max-height: calc(100vh - 70px);
+  overflow: auto;
+  padding: 14px 16px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--panel-line);
+  background: var(--panel-bg);
+  font-size: 14px;
+  line-height: 1.4;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.op-panel[hidden] {
+  display: none;
+}
+
+.op-panel h2 {
+  font-size: 15px;
+  margin: 0 0 8px;
+}
+
+.op-panel h3 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  margin: 14px 0 6px;
+}
+
+.op-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin: 6px 0;
+}
+
+.op-panel button,
+.op-panel select {
+  font: inherit;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--panel-line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.op-panel select {
+  max-width: 100%;
+  flex: 1;
+}
+
+.op-panel option {
+  color: #000;
+}
+
+.op-panel button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #2a0820;
+  font-weight: 700;
+}
+
+.op-panel button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.op-panel label.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+  cursor: pointer;
+}
+
+.op-status {
+  margin: 6px 0;
+  color: var(--text-dim);
+}
+
+.op-status.is-error {
+  color: #ffb4b4;
+}
+
+.op-privacy {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-left: 3px solid var(--accent-2);
+  background: rgba(185, 139, 255, 0.1);
+  font-size: 13px;
+}
+
+.op-margins {
+  display: grid;
+  grid-template-columns: 56px 1fr 44px;
+  gap: 4px 8px;
+  align-items: center;
+}
+
+.op-margins input {
+  width: 100%;
+}
+
+.op-preview {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  background: #000;
+  border-radius: 8px;
+  display: block;
+}
+
+.op-debug {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  margin: 6px 0 0;
+}
+
+.op-small {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin: 4px 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .demo-index,
+  .demo-thumb,
+  .demo-contact {
+    animation-duration: 3.6s;
+  }
+}
+
+html.reduced-motion .demo-index,
+html.reduced-motion .demo-thumb,
+html.reduced-motion .demo-contact {
+  animation-duration: 3.6s;
+}

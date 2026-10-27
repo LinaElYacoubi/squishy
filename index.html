@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en" data-display="desktop">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Cellipse cx=%2716%27 cy=%2718%27 rx=%2713%27 ry=%2712%27 fill=%27%23ff6fcf%27/%3E%3C/svg%3E" />
+    <title>Squishy</title>
+  </head>
+  <body>
+    <main id="app">
+      <div id="stage"></div>
+      <div id="safe-frame" aria-hidden="true"></div>
+
+      <div id="cursor" class="cursor is-hidden" aria-hidden="true">
+        <div class="cursor-ring"></div>
+        <div class="cursor-dot"></div>
+      </div>
+
+      <section id="prompt" class="prompt" aria-live="polite">
+        <p class="prompt-title"></p>
+        <p class="prompt-sub"></p>
+        <figure class="pinch-demo" aria-label="Demonstration: thumb and index finger close together in a pinch">
+          <svg viewBox="0 0 140 120" width="140" height="120" role="img" aria-hidden="true">
+            <!-- Side view of a right hand: palm, three curled fingers, index and thumb. -->
+            <rect class="demo-palm" x="6" y="40" width="46" height="66" rx="18" />
+            <rect class="demo-curl" x="40" y="58" width="24" height="13" rx="6.5" />
+            <rect class="demo-curl" x="40" y="72" width="22" height="13" rx="6.5" />
+            <rect class="demo-curl" x="38" y="86" width="19" height="12" rx="6" />
+            <g class="demo-index">
+              <line x1="40" y1="48" x2="102" y2="60" />
+            </g>
+            <g class="demo-thumb">
+              <line x1="30" y1="96" x2="100" y2="62" />
+            </g>
+            <circle class="demo-contact" cx="103" cy="61" r="9" />
+          </svg>
+          <figcaption>Pinch thumb and index finger</figcaption>
+        </figure>
+      </section>
+
+      <p id="hint" class="hint" aria-live="polite"></p>
+      <p id="snack-hint" class="snack-hint" aria-live="polite">Try giving me a snack.</p>
+      <p id="touch-hint" class="touch-hint">No need to touch the screen. Move your hand in the air.</p>
+      <p id="privacy-note" class="privacy-note">
+        Your camera is used for hand tracking. Video is processed in this browser and is not recorded or uploaded by this app.
+      </p>
+      <p id="mode-badge" class="mode-badge" hidden>Mouse test mode: move the mouse, click to pinch</p>
+
+      <div id="fatal" class="fatal" hidden role="alert">
+        <p class="fatal-title">The 3D display could not start</p>
+        <p class="fatal-text"></p>
+        <button type="button" class="fatal-reload">Reload</button>
+      </div>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
