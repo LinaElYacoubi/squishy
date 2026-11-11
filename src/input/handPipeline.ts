@@ -1,5 +1,5 @@
 import { CursorMapper } from './cursorMapper';
-import { HandSelector, toCandidate } from './handSelection';
+import { MultiHandSelector, toCandidate } from './handSelection';
 import type { InputHub } from './inputHub';
 import { LM, PinchDetector, pinchRatio, type Point3 } from './pinch';
 
@@ -9,29 +9,77 @@ export interface PipelineDebug {
   pinching: boolean;
   armed: boolean;
   hands: number;
+  /** Players currently followed. */
+  players: number;
+}
+
+/** Per-player state: which hand is followed, its pinch and its smoothed cursor. */
+interface PlayerSlot {
+  hub: InputHub;
+  pinch: PinchDetector;
+  mapper: CursorMapper;
+  selected: readonly Point3[] | null;
+  ratio: number | null;
+  armed: boolean;
 }
 
 /**
- * Turns raw hand landmark results into cursor and pinch state on the InputHub.
+ * Turns raw hand landmark results into cursor and pinch state on one InputHub per player.
  * Contains no browser or MediaPipe dependencies, so it can be tested with plain landmark arrays.
  */
 export class HandPipeline {
-  readonly selector = new HandSelector();
-  readonly pinch = new PinchDetector();
-  readonly mapper = new CursorMapper();
-  debug: PipelineDebug = { tracking: false, ratio: null, pinching: false, armed: false, hands: 0 };
-  /** Landmarks of the selected hand (for the setup preview only). */
-  selected: readonly Point3[] | null = null;
+  readonly selector: MultiHandSelector;
+  private players: PlayerSlot[];
+  debug: PipelineDebug = emptyDebug();
 
-  constructor(private hub: InputHub) {}
+  /** One hub per player (index = player). A single hub means a single player. */
+  constructor(hubs: InputHub | readonly InputHub[]) {
+    const list = Array.isArray(hubs) ? hubs : [hubs as InputHub];
+    this.players = list.map((hub) => ({
+      hub,
+      pinch: new PinchDetector(),
+      mapper: new CursorMapper(),
+      selected: null,
+      ratio: null,
+      armed: false,
+    }));
+    this.selector = new MultiHandSelector(list.length);
+  }
+
+  /** Player 1's pinch detector. */
+  get pinch(): PinchDetector {
+    return this.players[0].pinch;
+  }
+
+  /** Mirror and input region are set here and shared by every player. */
+  get mapper(): CursorMapper {
+    return this.players[0].mapper;
+  }
+
+  /** Landmarks of player 1's hand (setup preview). */
+  get selected(): readonly Point3[] | null {
+    return this.players[0].selected;
+  }
+
+  /** Landmarks of each player's hand, by player (setup preview). */
+  get selectedAll(): readonly (readonly Point3[] | null)[] {
+    return this.players.map((p) => p.selected);
+  }
+
+  get maxPlayers(): number {
+    return this.players.length;
+  }
+
+  /** Limit how many hands are followed (1 or 2). Players beyond it disappear. */
+  setPlayerCount(n: number): void {
+    this.selector.setActiveSlots(n);
+    for (let i = this.selector.activeSlots; i < this.players.length; i++) this.clear(this.players[i]);
+  }
 
   reset(): void {
     this.selector.reset();
-    this.pinch.reset();
-    this.mapper.reset();
-    this.selected = null;
-    this.hub.setPresent(false);
-    this.debug = { tracking: false, ratio: null, pinching: false, armed: false, hands: 0 };
+    for (const p of this.players) this.clear(p);
+    this.debug = emptyDebug();
   }
 
   /**
@@ -40,41 +88,62 @@ export class HandPipeline {
    */
   process(hands: readonly (readonly Point3[])[], tMs: number, aspect: number): void {
     const candidates = hands.filter((h) => h.length >= 21).map((h) => toCandidate(h, aspect));
-    const sel = this.selector.update(candidates, tMs, aspect);
-    this.debug.hands = candidates.length;
+    const results = this.selector.update(candidates, tMs, aspect);
+    const shared = this.players[0].mapper;
 
-    if (sel.kind === 'holding') return;
-
-    if (sel.kind === 'none') {
-      if (sel.lost || this.hub.present) {
-        this.pinch.reset();
-        this.mapper.reset();
-        this.hub.setPresent(false);
+    results.forEach((sel, i) => {
+      const p = this.players[i];
+      if (sel.kind === 'holding') return;
+      if (sel.kind === 'none') {
+        if (sel.lost || p.hub.present) this.clear(p);
+        p.selected = null;
+        return;
       }
-      this.selected = null;
-      this.debug = { ...this.debug, tracking: false, ratio: null, pinching: false, armed: false };
-      return;
-    }
 
-    const lm = sel.hand.landmarks;
-    if (sel.acquired) {
-      // A new or returning hand must show an open hand before a pinch counts.
-      this.pinch.reset();
-      this.mapper.reset();
-      this.hub.markAcquired();
-    }
-    this.selected = lm;
+      const lm = sel.hand.landmarks;
+      if (sel.acquired) {
+        // A new or returning hand must show an open hand before a pinch counts.
+        p.pinch.reset();
+        p.mapper.reset();
+        p.hub.markAcquired();
+      }
+      p.selected = lm;
+      p.mapper.mirror = shared.mirror;
+      p.mapper.region = shared.region;
 
-    const tip = lm[LM.INDEX_TIP];
-    const { u, v } = this.mapper.map(tip.x, tip.y, tMs);
-    this.hub.setPresent(true);
-    this.hub.move(u, v, tMs);
+      const tip = lm[LM.INDEX_TIP];
+      const { u, v } = p.mapper.map(tip.x, tip.y, tMs);
+      p.hub.setPresent(true);
+      p.hub.move(u, v, tMs);
 
-    const ratio = pinchRatio(lm, aspect);
-    const res = this.pinch.update(ratio, tMs);
-    this.hub.setPinching(res.pinching);
-    if (res.pinchStart) this.hub.pinchStart();
+      p.ratio = pinchRatio(lm, aspect);
+      const res = p.pinch.update(p.ratio, tMs);
+      p.armed = res.armed;
+      p.hub.setPinching(res.pinching);
+      if (res.pinchStart) p.hub.pinchStart();
+    });
 
-    this.debug = { ...this.debug, tracking: true, ratio, pinching: res.pinching, armed: res.armed };
+    const first = this.players[0];
+    this.debug = {
+      tracking: first.selected !== null,
+      ratio: first.selected ? first.ratio : null,
+      pinching: first.selected ? first.pinch.pinching : false,
+      armed: first.selected ? first.armed : false,
+      hands: candidates.length,
+      players: this.players.filter((p) => p.selected !== null).length,
+    };
   }
+
+  private clear(p: PlayerSlot): void {
+    p.pinch.reset();
+    p.mapper.reset();
+    p.hub.setPresent(false);
+    p.selected = null;
+    p.ratio = null;
+    p.armed = false;
+  }
+}
+
+function emptyDebug(): PipelineDebug {
+  return { tracking: false, ratio: null, pinching: false, armed: false, hands: 0, players: 0 };
 }

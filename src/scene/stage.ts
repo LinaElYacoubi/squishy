@@ -1,9 +1,13 @@
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { CONFIG, type SafeMargins } from '../config';
 import type { StageBounds } from '../game/game';
 
-export type DisplayMode = 'desktop' | 'black';
+export type DisplayMode = 'desktop' | 'black' | 'hologram';
 
 export class WebGLUnavailableError extends Error {}
 
@@ -20,6 +24,9 @@ export interface SafeRect {
  * The camera is fixed and looks straight at the creature plane (z = 0), so screen pixels map
  * linearly to world positions on that plane. Safe margins shrink the area creatures and the
  * cursor may use, so the scene can be fitted to the real display later.
+ *
+ * Hologram mode renders a native UHD frame on opaque black through a bloom pass. The composer is
+ * only created the first time that mode is used, so the other modes pay nothing for it.
  */
 export class Stage {
   readonly renderer: THREE.WebGLRenderer;
@@ -35,6 +42,9 @@ export class Stage {
   private visibleW = 1;
   private visibleH = 1;
   private envTexture: THREE.Texture;
+  private rim: THREE.DirectionalLight;
+  private composer: EffectComposer | null = null;
+  private bloom: UnrealBloomPass | null = null;
 
   constructor(
     private container: HTMLElement,
@@ -72,9 +82,9 @@ export class Stage {
     const hemi = new THREE.HemisphereLight('#fff2fb', '#3b2357', 0.9);
     const key = new THREE.DirectionalLight('#ffffff', 2.0);
     key.position.set(-4, 6, 8);
-    const rim = new THREE.DirectionalLight('#c9a8ff', 1.6);
-    rim.position.set(5, 3, -6);
-    this.scene.add(hemi, key, rim);
+    this.rim = new THREE.DirectionalLight('#c9a8ff', 1.6);
+    this.rim.position.set(5, 3, -6);
+    this.scene.add(hemi, key, this.rim);
 
     this.resize();
   }
@@ -95,6 +105,35 @@ export class Stage {
   setDisplayMode(mode: DisplayMode): void {
     this.mode = mode;
     document.documentElement.dataset.display = mode;
+    const holo = mode === 'hologram';
+    const h = CONFIG.hologram;
+    // Opaque black in the capsule: black is "nothing there", and bloom needs a solid background.
+    this.renderer.setClearColor(0x000000, holo ? 1 : 0);
+    this.renderer.toneMappingExposure = holo ? h.exposure : 1.05;
+    this.rim.intensity = holo ? h.rimLight : 1.6;
+    if (holo && !this.composer) {
+      this.composer = new EffectComposer(this.renderer);
+      this.bloom = new UnrealBloomPass(new THREE.Vector2(this.width, this.height), h.bloomStrength, h.bloomRadius, h.bloomThreshold);
+      this.composer.addPass(new RenderPass(this.scene, this.camera));
+      this.composer.addPass(this.bloom);
+      this.composer.addPass(new OutputPass());
+    }
+    this.resize();
+  }
+
+  /** Size of the frame actually rendered, in device pixels (shown in the setup diagnostics). */
+  get renderSize(): { width: number; height: number } {
+    const v = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+    return { width: v.x, height: v.y };
+  }
+
+  /**
+   * Hologram mode always renders at UHD: the long window edge maps to the long UHD edge, whatever
+   * the OS scaling. Other modes follow the screen's pixel ratio, capped for performance.
+   */
+  private pixelRatio(w: number, h: number): number {
+    if (this.mode === 'hologram') return Math.max(CONFIG.hologram.width, CONFIG.hologram.height) / Math.max(w, h);
+    return Math.min(window.devicePixelRatio || 1, CONFIG.render.maxPixelRatio);
   }
 
   resize(): void {
@@ -102,8 +141,13 @@ export class Stage {
     const h = Math.max(1, this.container.clientHeight);
     this.width = w;
     this.height = h;
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, CONFIG.render.maxPixelRatio));
+    const pr = this.pixelRatio(w, h);
+    this.renderer.setPixelRatio(pr);
     this.renderer.setSize(w, h, false);
+    if (this.composer) {
+      this.composer.setPixelRatio(pr);
+      this.composer.setSize(w, h);
+    }
     this.renderer.domElement.style.width = '100%';
     this.renderer.domElement.style.height = '100%';
     this.camera.aspect = w / h;
@@ -186,12 +230,15 @@ export class Stage {
   }
 
   render(): void {
-    this.renderer.render(this.scene, this.camera);
+    if (this.mode === 'hologram' && this.composer) this.composer.render();
+    else this.renderer.render(this.scene, this.camera);
   }
 
   dispose(): void {
     this.renderer.domElement.removeEventListener('webglcontextlost', this.handleContextLost);
     this.envTexture.dispose();
+    this.bloom?.dispose();
+    this.composer?.dispose();
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }

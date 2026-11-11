@@ -5,6 +5,8 @@ import { CONFIG } from '../config';
 import type { FoodKind, FoodModel } from '../game/food';
 import type { StageBounds } from '../game/game';
 
+const TRAY_COLOR = '#e7dcff';
+
 /**
  * Procedural food items and their tray. Food is drawn in front of the creatures (at depth
  * CONFIG.food.depth) and scaled toward the camera axis so it appears exactly where its
@@ -14,6 +16,7 @@ export class FoodLayer {
   private readonly group = new THREE.Group();
   private readonly items: { kind: FoodKind; obj: THREE.Group }[] = [];
   private readonly tray: THREE.Mesh;
+  private readonly trayMat: THREE.MeshStandardMaterial;
   private readonly ring: THREE.Mesh;
   private readonly ringMat: THREE.MeshBasicMaterial;
   private readonly geometries: THREE.BufferGeometry[] = [];
@@ -79,10 +82,8 @@ export class FoodLayer {
     }
 
     // Tray, tilted toward the camera so its top is visible.
-    this.tray = new THREE.Mesh(
-      g(new THREE.CylinderGeometry(1, 0.92, 0.22, 48)),
-      m(new THREE.MeshStandardMaterial({ color: '#e7dcff', roughness: 0.35, emissive: '#e7dcff', emissiveIntensity: 0.08 })),
-    );
+    this.trayMat = m(new THREE.MeshStandardMaterial({ color: TRAY_COLOR, roughness: 0.35, emissive: TRAY_COLOR, emissiveIntensity: 0.08 }));
+    this.tray = new THREE.Mesh(g(new THREE.CylinderGeometry(1, 0.92, 0.22, 48)), this.trayMat);
     this.tray.rotation.x = 0.5;
     this.group.add(this.tray);
 
@@ -93,6 +94,13 @@ export class FoodLayer {
     this.group.add(this.ring);
 
     scene.add(this.group);
+  }
+
+  /** A darker tray in the hologram capsule, so it does not bloom into a bright disc under the food. */
+  setHologram(on: boolean): void {
+    const color = on ? CONFIG.hologram.trayColor : TRAY_COLOR;
+    this.trayMat.color.set(color);
+    this.trayMat.emissive.set(color);
   }
 
   update(foods: readonly FoodModel[], b: StageBounds, time: number): void {

@@ -1,5 +1,6 @@
 import { CONFIG } from '../config';
 import { Spring, approach, clamp, easeInOut, lerp } from './anim';
+import { REST_POSE, type GreetPose } from './idleGreeting';
 
 /**
  * Distance from the body's centre to its flattened base, in body radii.
@@ -7,7 +8,29 @@ import { Spring, approach, clamp, easeInOut, lerp } from './anim';
  */
 export const BODY_BOTTOM = 0.86;
 
-export type Expression = 'neutral' | 'curious' | 'surprised' | 'happy' | 'cheeky' | 'hungry';
+export type Expression =
+  | 'neutral'
+  | 'curious'
+  | 'surprised'
+  | 'happy'
+  | 'cheeky'
+  | 'hungry'
+  /** Spiral eyes after a big bounce (secret reaction). */
+  | 'dizzy'
+  /** Eyes closed, relaxed smile (being petted). */
+  | 'content'
+  /** Crossed eyes and a lopsided grin (a silly miss or a wrong answer). */
+  | 'goofy'
+  /** Big eyes, open grin (anticipation before a toss, a lit bubble). */
+  | 'excited'
+  /** Eyes closed, small open mouth (dozing off after a long pet). */
+  | 'sleepy';
+
+/** How a creature last became airborne: thrown, dropped slowly, or let go because the hand was lost. */
+export type Launch = 'throw' | 'drop' | 'lost' | null;
+
+/** Temporary Merge Magic looks. */
+export type MagicLook = 'star' | 'ocean' | 'galaxy';
 
 /**
  * free:     on the floor, idle behaviour and dodging allowed
@@ -93,8 +116,30 @@ export class CreatureModel {
   nextIdleAt = 3;
   nextLookAt = 0;
   chewUntil = 0;
+  /**
+   * Idle greeting pose, set by the app each frame. Visual only: the renderer adds it on top of
+   * the model; gameplay, physics and hit testing never read it.
+   */
+  greet: Readonly<GreetPose> = REST_POSE;
+
+  /** How this creature became airborne (cleared when it lands). Lost-hand drops never count as throws. */
+  launch: Launch = null;
+  /** Seconds the current grab has lasted. */
+  heldFor = 0;
+  /** Bounces and hardest impact (0..1) since the last release. */
+  bounces = 0;
+  hardestImpact = 0;
+  /** 0..1: relaxed by petting (lower squash, rosier cheeks). Visual only. */
+  relax = 0;
+  /** Temporary Merge Magic look and its remaining strength (0..1, fades out at the end). */
+  magic: MagicLook | null = null;
+  magicUntil = 0;
 
   private reaction: Expression | null = null;
+  private wiggleUntil = 0;
+  private wiggleAmp = 0;
+  private wiggleHz = 0;
+  private wiggleStart = 0;
   private reactionUntil = 0;
   private lookHoldUntil = 0;
   private tintFadeRate = 0;
@@ -179,6 +224,45 @@ export class CreatureModel {
     this.reactionUntil = this.clock + seconds;
   }
 
+  /** Currently playing short reaction, if any. */
+  get reactionExpression(): Expression | null {
+    return this.reaction && this.clock < this.reactionUntil ? this.reaction : null;
+  }
+
+  /**
+   * A side-to-side wiggle (happy wiggle, head shake, goofy wobble). Visual only: the renderer adds
+   * `wiggleLean` to the body lean; position and hit areas are unchanged.
+   */
+  wiggle(seconds: number, amplitude: number, hz: number): void {
+    this.wiggleStart = this.clock;
+    this.wiggleUntil = this.clock + seconds;
+    this.wiggleAmp = amplitude * this.wobbleScale;
+    this.wiggleHz = hz;
+  }
+
+  get wiggling(): boolean {
+    return this.clock < this.wiggleUntil;
+  }
+
+  get wiggleLean(): number {
+    if (this.clock >= this.wiggleUntil) return 0;
+    const t = this.clock - this.wiggleStart;
+    const total = this.wiggleUntil - this.wiggleStart;
+    const env = Math.min(1, t / 0.12) * Math.min(1, (total - t) / 0.25);
+    return this.wiggleAmp * env * Math.sin(t * Math.PI * 2 * this.wiggleHz);
+  }
+
+  /** Strength of the Merge Magic look (0..1), fading out over its last second. */
+  get magicAmount(): number {
+    if (!this.magic) return 0;
+    return clamp(this.magicUntil - this.clock, 0, 1);
+  }
+
+  setMagic(look: MagicLook, seconds: number): void {
+    this.magic = look;
+    this.magicUntil = this.clock + seconds;
+  }
+
   /** Quick surprised blink (after a bounce or merge). */
   surpriseBlink(): void {
     this.react('surprised', 0.35);
@@ -220,6 +304,14 @@ export class CreatureModel {
     this.chewUntil = 0;
     this.baseExpression = 'neutral';
     this.motion = 'free';
+    this.launch = null;
+    this.heldFor = 0;
+    this.bounces = 0;
+    this.hardestImpact = 0;
+    this.relax = 0;
+    this.magic = null;
+    this.magicUntil = 0;
+    this.wiggleUntil = 0;
   }
 
   cancelHop(): void {
@@ -261,6 +353,7 @@ export class CreatureModel {
     this.lookY = approach(this.lookY, this.lookTargetY, 12, dt);
     this.shiver = approach(this.shiver, 0, 6, dt);
     this.tintAmount = Math.max(0, this.tintAmount - this.tintFadeRate * dt);
+    if (this.magic && this.clock >= this.magicUntil) this.magic = null;
     this.updateBlink(dt);
   }
 
@@ -294,7 +387,8 @@ export class CreatureModel {
 
   private updateBlink(dt: number): void {
     const expr = this.expression;
-    if (expr === 'happy' && !this.chewing) {
+    // Happy (including delighted chewing) and content close the eyes into smiling arcs.
+    if (expr === 'happy' || expr === 'content') {
       this.blink = approach(this.blink, 1, 18, dt);
       return;
     }

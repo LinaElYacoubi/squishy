@@ -1,4 +1,5 @@
 import type { SafeMargins } from '../config';
+import type { GameId } from '../game/playground/types';
 import type { DisplayMode } from '../scene/stage';
 import type { OperatorSettings, ReducedMotionSetting } from '../settings';
 
@@ -16,6 +17,10 @@ export interface OperatorActions {
   setMouseMode(on: boolean): void;
   splitDemo(): void;
   setStartWithMinis(on: boolean): void;
+  /** Follow up to two hands (two players) or only one. */
+  setTwoPlayers(on: boolean): void;
+  /** Jump straight into a Play Together mini-game (testing with mouse mode, demos). */
+  startGame(id: GameId): void;
 }
 
 export type CameraStatus =
@@ -60,6 +65,7 @@ const TEMPLATE = `
     <select id="op-display" data-id="display">
       <option value="desktop">Desktop preview (dark scene, shadow)</option>
       <option value="black">Black background (no floor)</option>
+      <option value="hologram">Hologram capsule (4K portrait, glow)</option>
     </select>
   </div>
   <label class="check"><input type="checkbox" data-id="mirror" /> Mirror tracking (natural for visitors facing the camera)</label>
@@ -77,7 +83,14 @@ const TEMPLATE = `
   <div class="op-row">
     <button type="button" data-id="split">Split demo (one Squishy into three)</button>
   </div>
+  <div class="op-row">
+    <span class="op-small">Start a game:</span>
+    <button type="button" data-id="game-says">Squishy Says</button>
+    <button type="button" data-id="game-snack">Snack Surprise</button>
+    <button type="button" data-id="game-bounce">Bubble Bounce</button>
+  </div>
   <label class="check"><input type="checkbox" data-id="minis" /> Start with three small Squishies (to test merging)</label>
+  <label class="check"><input type="checkbox" data-id="two" /> Two players (follow up to two hands, each with its own cursor)</label>
 
   <h3>Safe margins</h3>
   <div class="op-margins" data-id="margins"></div>
@@ -86,7 +99,7 @@ const TEMPLATE = `
   <label class="check"><input type="checkbox" data-id="preview" /> Show setup preview (camera and landmarks)</label>
   <canvas class="op-preview" data-id="canvas" width="320" height="240" hidden></canvas>
   <p class="op-debug" data-id="debug" hidden></p>
-  <label class="check"><input type="checkbox" data-id="mouse" /> Mouse test mode (click = pinch)</label>
+  <label class="check"><input type="checkbox" data-id="mouse" /> Mouse test mode (click = pinch, hold Shift for player 2)</label>
   <p class="op-small">Press O to show or hide this panel.</p>
 `;
 
@@ -160,6 +173,7 @@ export class OperatorPanel {
     (this.els.motion as HTMLSelectElement).value = s.reducedMotion;
     (this.els.mouse as HTMLInputElement).checked = mouseMode;
     (this.els.minis as HTMLInputElement).checked = s.startWithMinis;
+    (this.els.two as HTMLInputElement).checked = s.twoPlayers;
     (this.els.preview as HTMLInputElement).checked = preview;
     this.els.canvas.hidden = !preview;
     this.els.debug.hidden = !preview;
@@ -256,7 +270,11 @@ export class OperatorPanel {
     });
     on('mouse', 'change', (e) => a.setMouseMode((e.target as HTMLInputElement).checked));
     on('split', 'click', () => a.splitDemo());
+    on('game-says', 'click', () => a.startGame('says'));
+    on('game-snack', 'click', () => a.startGame('snack'));
+    on('game-bounce', 'click', () => a.startGame('bounce'));
     on('minis', 'change', (e) => a.setStartWithMinis((e.target as HTMLInputElement).checked));
+    on('two', 'change', (e) => a.setTwoPlayers((e.target as HTMLInputElement).checked));
 
     for (const { input, out } of this.marginInputs.values()) {
       input.addEventListener(

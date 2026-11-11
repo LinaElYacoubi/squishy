@@ -53,6 +53,16 @@ export class HandSelector {
     return this.track !== null;
   }
 
+  /** Where the followed hand was last seen (null while not tracking). */
+  get trackedAt(): { cx: number; cy: number; size: number } | null {
+    return this.track;
+  }
+
+  /** Largest accepted frame-to-frame movement for a hand of this palm size. */
+  gate(size: number): number {
+    return Math.max(this.cfg.maxJumpMin, this.cfg.maxJumpPalms * size);
+  }
+
   reset(): void {
     this.track = null;
     this.pending = null;
@@ -118,6 +128,77 @@ export class HandSelector {
       return { kind: 'tracking', hand: best, acquired: true };
     }
     return { kind: 'none', lost: false };
+  }
+}
+
+/**
+ * Follows up to `slots` hands at once, one per player. Each slot is a HandSelector, so every
+ * player gets the same safeguards as a single hand (consistent acquisition, grace period, and
+ * dropping the track instead of guessing when hands overlap).
+ *
+ * Slots that already follow a hand update first and claim it. Only one empty slot acquires at a
+ * time, from hands nobody follows and that are not near a briefly missing tracked hand, so two
+ * players can never end up on the same hand.
+ */
+export class MultiHandSelector {
+  readonly slots: HandSelector[];
+  /** How many slots may follow a hand (1 = single player). */
+  private active: number;
+
+  constructor(count: number, cfg: SelectionConfig = CONFIG.tracking) {
+    this.slots = Array.from({ length: count }, () => new HandSelector(cfg));
+    this.active = count;
+  }
+
+  get activeSlots(): number {
+    return this.active;
+  }
+
+  setActiveSlots(n: number): void {
+    this.active = Math.max(1, Math.min(this.slots.length, Math.round(n)));
+    for (let i = this.active; i < this.slots.length; i++) this.slots[i].reset();
+  }
+
+  reset(): void {
+    for (const s of this.slots) s.reset();
+  }
+
+  update(candidates: readonly HandCandidate[], tMs: number, aspect: number): SelectionResult[] {
+    const results: SelectionResult[] = this.slots.map(() => ({ kind: 'none', lost: false }));
+    const claimed = new Set<HandCandidate>();
+    const updated = new Set<number>();
+
+    // 1. Slots already following a hand keep it.
+    for (let i = 0; i < this.active; i++) {
+      const s = this.slots[i];
+      if (!s.isTracking) continue;
+      updated.add(i);
+      const r = s.update(
+        candidates.filter((c) => !claimed.has(c)),
+        tMs,
+        aspect,
+      );
+      if (r.kind === 'tracking') claimed.add(r.hand);
+      results[i] = r;
+    }
+
+    // 2. Hands that might belong to a tracked hand that is briefly missing are off limits.
+    const reserved = (c: HandCandidate) =>
+      this.slots.some((s) => {
+        const t = s.trackedAt;
+        return t !== null && Math.hypot((c.cx - t.cx) * aspect, c.cy - t.cy) < s.gate(t.size);
+      });
+    const free = candidates.filter((c) => !claimed.has(c) && !reserved(c));
+
+    // 3. The first empty slot acquires; later empty slots wait their turn.
+    let acquiring = false;
+    for (let i = 0; i < this.active; i++) {
+      const s = this.slots[i];
+      if (updated.has(i)) continue;
+      results[i] = s.update(acquiring ? [] : free, tMs, aspect);
+      acquiring = true;
+    }
+    return results;
   }
 }
 

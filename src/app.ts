@@ -1,9 +1,15 @@
+import { SoundFx } from './audio/sound';
 import { CONFIG } from './config';
 import { CreatureAssets } from './creature/assets';
 import { FoodLayer } from './creature/foodView';
 import { JellyView } from './creature/jellyView';
 import { ActivityMonitor } from './game/activity';
-import { Game, type GameInput } from './game/game';
+import { Game, MAX_PLAYERS, type GameInput } from './game/game';
+import { IdleGreeting, REST_POSE } from './game/idleGreeting';
+import { BODY_BOTTOM } from './game/creatureModel';
+import { Playground } from './game/playground/playground';
+import type { GameId } from './game/playground/types';
+import { EffectsLayer } from './scene/effectsLayer';
 import { HandPipeline } from './input/handPipeline';
 import { ERROR_MESSAGES, HandTracker, TrackerError } from './input/handTracker';
 import { InputHub, type InputSnapshot, type InputSource } from './input/inputHub';
@@ -11,8 +17,10 @@ import type { Point3 } from './input/pinch';
 import { Stage } from './scene/stage';
 import { loadSettings, sanitizeMargins, saveSettings, type OperatorSettings } from './settings';
 import { OperatorPanel, type CameraStatus } from './ui/operatorPanel';
+import type { Language } from './ui/i18n';
 import { drawSetupPreview } from './ui/setupPreview';
-import { VisitorOverlay, type CursorMode } from './ui/visitorOverlay';
+import { VisitorControls } from './ui/visitorControls';
+import { VisitorOverlay, type BubbleLabel, type CursorMode } from './ui/visitorOverlay';
 
 /**
  * Wires everything together: one render loop (requestAnimationFrame), one independently
@@ -24,11 +32,21 @@ export class App {
   private views: JellyView[];
   private foodLayer: FoodLayer;
   readonly game: Game;
-  readonly hub = new InputHub(CONFIG.hit.historyMs);
-  private pipeline = new HandPipeline(this.hub);
+  /** Squishy's Playground: Free Play extras and the Play Together mini-games. */
+  readonly playground: Playground;
+  private effects: EffectsLayer;
+  /** One input hub per player (index = player). */
+  readonly hubs: InputHub[] = Array.from({ length: MAX_PLAYERS }, () => new InputHub(CONFIG.hit.historyMs));
+  private pipeline = new HandPipeline(this.hubs);
   private tracker: HandTracker;
-  private activity = new ActivityMonitor();
+  private activity = this.hubs.map(() => new ActivityMonitor());
+  /** Mouse test mode: the hub the mouse button is pinching (Shift = player 2). */
+  private mouseHub: InputHub | null = null;
   private overlay = new VisitorOverlay();
+  private controls: VisitorControls;
+  private sound: SoundFx;
+  private greeting = new IdleGreeting();
+  private reduced = false;
   private panel: OperatorPanel;
   private settings: OperatorSettings;
   private source: InputSource = 'hand';
@@ -57,6 +75,9 @@ export class App {
   /** "Try giving me a snack." is shown once per visitor session, until food is picked up. */
   private snackStart: number | null = null;
   private snackDone = false;
+  private snackVisible = false;
+  /** Inactivity elapsed, but a round is in progress with someone there: reset once it is safe. */
+  private resetPending = false;
 
   constructor(root: HTMLElement) {
     this.settings = loadSettings();
@@ -65,18 +86,58 @@ export class App {
     this.stage.setDisplayMode(this.settings.displayMode);
 
     this.assets = new CreatureAssets();
+    this.assets.setHologram(this.settings.displayMode === 'hologram');
     this.game = new Game(this.stage.bounds);
     this.game.startWithMinis = this.settings.startWithMinis;
     this.game.reset();
     this.views = [0, 1, 2, 3].map((i) => new JellyView(this.assets, i, this.stage.scene));
     this.foodLayer = new FoodLayer(this.stage.scene);
-    this.game.events = {
-      onGrab: (kind) => {
-        this.overlay.pulseCatch();
-        if (kind === 'food') this.snackDone = true;
-      },
-      onFeed: () => this.overlay.pulseCatch(),
+    this.foodLayer.setHologram(this.settings.displayMode === 'hologram');
+    this.sound = new SoundFx(this.settings.sound);
+    this.effects = new EffectsLayer(this.stage.scene);
+    this.effects.setHologram(this.settings.displayMode === 'hologram');
+    this.playground = new Playground(this.game);
+    const pg = this.playground;
+    pg.fx = {
+      sound: (name, strength, pitch) => void this.sound.play(name, strength, pitch),
+      burst: (x, y, kind, color, count) => this.effects.burst(x, y, kind, color, count),
+      heart: (x, y) => this.effects.heart(x, y),
     };
+    this.game.events = {
+      onGrab: (kind, player) => {
+        this.overlay.pulseCatch(player);
+        if (kind === 'food') this.snackDone = true;
+        this.sound.play('grab');
+      },
+      onRelease: (kind, c) => {
+        // A lost hand is not a visitor action: stay quiet.
+        if (kind === 'drop') this.sound.play('drop');
+        else if (kind === 'throw') this.sound.play('throw');
+        if (c) pg.onRelease(kind, c);
+      },
+      onBounce: (strength) => this.sound.play('bounce', 0.35 + 0.65 * strength),
+      onOffer: (f, c) => pg.onOffer(f, c),
+      onFeed: (f, c) => {
+        this.overlay.pulseCatch(this.game.feedTargets.findIndex((t) => t === c));
+        this.sound.play('feed');
+        if (f && c) pg.onFeed(f, c);
+      },
+      onLand: (c, launch) => pg.onLand(c, launch),
+      onMerge: (survivor, absorbed) => {
+        this.sound.play('merge');
+        if (survivor && absorbed) pg.onMerge(survivor, absorbed);
+      },
+      onSplit: () => pg.onSplit(),
+      beforeAnimate: (dt) => pg.animate(dt),
+    };
+
+    this.controls = new VisitorControls({
+      setLanguage: (lang) => this.setLanguage(lang),
+      toggleSound: () => this.toggleSound(),
+    });
+    this.sound.onStateChange = (state) => this.controls.setSoundState(state);
+    this.controls.setSoundState(this.sound.state);
+    this.setLanguage(this.settings.language, false);
 
     this.tracker = new HandTracker();
     this.tracker.onHands = (hands, t, aspect) => {
@@ -85,6 +146,7 @@ export class App {
     };
     this.tracker.onCameraEnded = () => this.setCameraError(ERROR_MESSAGES.unavailable);
     this.pipeline.mapper.mirror = this.settings.mirror;
+    this.pipeline.setPlayerCount(this.settings.twoPlayers ? MAX_PLAYERS : 1);
 
     this.panel = new OperatorPanel(root, {
       enableCamera: () => void this.startCamera(this.settings.cameraId ?? undefined),
@@ -99,6 +161,10 @@ export class App {
       setDisplayMode: (mode) => {
         this.settings.displayMode = mode;
         this.stage.setDisplayMode(mode);
+        this.assets.setHologram(mode === 'hologram');
+        this.foodLayer.setHologram(mode === 'hologram');
+        this.effects.setHologram(mode === 'hologram');
+        this.applyBounds();
         saveSettings(this.settings);
       },
       setMirror: (mirror) => {
@@ -115,8 +181,7 @@ export class App {
       setMargins: (m) => {
         this.settings.margins = sanitizeMargins(m);
         this.stage.setMargins(this.settings.margins);
-        this.game.setBounds(this.stage.bounds);
-        this.updateSafeFrame();
+        this.applyBounds();
         saveSettings(this.settings);
       },
       setPreview: (show) => (this.showPreview = show),
@@ -131,6 +196,13 @@ export class App {
         this.game.startWithMinis = on;
         saveSettings(this.settings);
         this.resetExperience();
+      },
+      startGame: (id: GameId) => this.playground.startGame(id),
+      setTwoPlayers: (on) => {
+        this.settings.twoPlayers = on;
+        this.pipeline.setPlayerCount(on ? MAX_PLAYERS : 1);
+        for (let p = 1; p < this.hubs.length; p++) if (!on) this.hubs[p].reset();
+        saveSettings(this.settings);
       },
     });
     this.panel.setValues(this.settings, false, false);
@@ -149,7 +221,14 @@ export class App {
     this.panel.setOpen(true);
 
     if (new URLSearchParams(location.search).has('debug')) {
-      (window as unknown as { __jelly: unknown }).__jelly = { app: this, game: this.game, hub: this.hub };
+      (window as unknown as { __jelly: unknown }).__jelly = {
+        app: this,
+        game: this.game,
+        hub: this.hubs[0],
+        hubs: this.hubs,
+        playground: this.playground,
+        stage: this.stage,
+      };
     }
   }
 
@@ -174,22 +253,52 @@ export class App {
     this.abort.abort();
     this.resizeObserver.disconnect();
     this.tracker.dispose();
+    this.sound.dispose();
     this.panel.dispose();
+    this.controls.dispose();
     this.overlay.dispose();
     for (const v of this.views) v.dispose();
     this.foodLayer.dispose();
+    this.effects.dispose();
     this.assets.dispose();
     this.stage.dispose();
   }
 
   /** Operator Reset: back to the inviting idle state from any state. Creates no loops or listeners. */
   resetExperience(): void {
+    this.playground.reset();
+    this.playground.memory.reset();
     this.game.reset();
-    this.hub.reset();
+    for (const h of this.hubs) h.reset();
     this.pipeline.reset();
-    this.activity.reset();
+    for (const a of this.activity) a.reset();
+    this.greeting.reset();
     this.resetGuidance();
     this.wasPresent = false;
+    this.resetPending = false;
+  }
+
+  // ---------------------------------------------------------------- language and sound
+
+  /** Switch visitor text immediately; the game and camera keep running. */
+  setLanguage(lang: Language, save = true): void {
+    this.settings.language = lang;
+    this.overlay.setLanguage(lang);
+    this.controls.setLanguage(lang);
+    if (save) saveSettings(this.settings);
+  }
+
+  /** Only called from a click or key press, which is what allows the browser to start audio. */
+  private toggleSound(): void {
+    // Sound is on but still waiting for a user action: this click starts it rather than muting.
+    if (this.sound.state === 'locked') {
+      this.sound.unlock();
+      return;
+    }
+    const on = !this.sound.isEnabled;
+    this.settings.sound = on;
+    this.sound.setEnabled(on, true);
+    saveSettings(this.settings);
   }
 
   /** Show the instructions and snack hint again, as for a new visitor. */
@@ -211,53 +320,119 @@ export class App {
     this.lastFrame = now;
     const t = performance.now();
 
-    const snap = this.hub.take(t);
-    const act = this.activity.update(t, snap);
-    if (act.timedOut) this.handleInactivity();
+    const snaps = this.hubs.map((h) => h.take(t));
+    const acts = snaps.map((s, i) => this.activity[i].update(t, s));
+    // Reset only once every player has been inactive for the full delay.
+    const allIdle = acts.every((a) => a.idleMs >= CONFIG.activity.inactivityMs);
+    if (acts.some((a) => a.timedOut) && allIdle) this.resetPending = true;
+    if (!allIdle) this.resetPending = false;
+    const anyPresent = snaps.some((s) => s.present);
+    // Never reset in the middle of a round while someone is there (watching Squishy Says, say).
+    if (this.resetPending && !(this.playground.inRound && anyPresent)) {
+      this.resetPending = false;
+      this.handleInactivity();
+    }
 
-    const p = this.stage.safeToWorld(snap.u, snap.v);
-    const input: GameInput = {
-      present: snap.present,
-      active: act.active,
-      x: p.x,
-      y: p.y,
-      pinching: snap.pinching,
-      pinchStart: snap.pinchStart,
-      acquired: snap.acquired,
-      recent: snap.history.map((s) => ({ ...this.stage.safeToWorld(s.u, s.v), t: s.t })),
-    };
-    this.game.update(dt, input);
+    const inputs: GameInput[] = snaps.map((snap, i) => {
+      const p = this.stage.safeToWorld(snap.u, snap.v);
+      return {
+        present: snap.present,
+        active: acts[i].active,
+        x: p.x,
+        y: p.y,
+        pinching: snap.pinching,
+        pinchStart: snap.pinchStart,
+        acquired: snap.acquired,
+        recent: snap.history.map((s) => ({ ...this.stage.safeToWorld(s.u, s.v), t: s.t })),
+      };
+    });
+    // Pinches on playground bubbles are consumed here, so they never also grab Squishy.
+    const gameInputs = this.playground.preUpdate(dt, inputs);
+    this.game.update(dt, gameInputs);
+    this.updateGreeting(dt, anyPresent);
 
     const b = this.stage.bounds;
     const shadows = this.stage.mode === 'desktop';
     this.game.creatures.forEach((c, i) => this.views[i].update(c, this.game.time, dt, b.floorY, shadows));
     this.foodLayer.update(this.game.foods, b, this.game.time);
+    this.effects.update(dt, this.playground.bubbles, this.game.creatures, b, this.game.time);
+    this.updatePlaygroundUi();
 
-    const px = this.stage.safeToPixel(snap.u, snap.v);
-    this.overlay.setCursor(snap.present, px.x, px.y, this.cursorMode(input), snap.pinching);
-    this.updatePrompts(dt, t, snap, act.active);
+    snaps.forEach((snap, i) => {
+      const px = this.stage.safeToPixel(snap.u, snap.v);
+      this.overlay.setCursor(i, snap.present, px.x, px.y, this.cursorMode(inputs[i], i), snap.pinching);
+    });
+    // Prompts treat everyone as one audience: someone is here, someone pinched.
+    const primary = snaps.find((s) => s.present) ?? snaps[0];
+    const together: InputSnapshot = { ...primary, present: anyPresent, pinchStart: snaps.some((s) => s.pinchStart) };
+    this.updatePrompts(dt, t, together, acts.some((a) => a.active));
 
     this.stage.render();
     this.updateDiagnostics(now);
   };
 
-  private cursorMode(input: GameInput): CursorMode {
-    if (this.game.heldFood) return this.game.feedTarget ? 'feed' : 'holding';
-    if (this.game.grabbed) return 'holding';
-    return this.game.hover(input) === 'none' ? 'idle' : 'over';
+  /**
+   * Idle greeting: visual only, silent, and stopped the same frame a hand appears. It is applied
+   * after the game update and never changes positions, sizes or hit areas.
+   */
+  private updateGreeting(dt: number, present: boolean): void {
+    this.greeting.update(dt * 1000, present);
+    this.game.creatures.forEach((c, i) => {
+      const calm = c.alive && c.motion === 'free' && !c.isHopping && !c.chewing;
+      c.greet = calm ? this.greeting.pose(this.reduced, i * 180) : REST_POSE;
+    });
+    this.overlay.setGreeting(this.greeting.greeting);
+  }
+
+  private cursorMode(input: GameInput, player: number): CursorMode {
+    const g = this.game;
+    if (g.heldFoodBy(player)) return g.feedTargets[player] ? 'feed' : 'holding';
+    if (g.grabbedBy(player)) return 'holding';
+    if (this.playground.hover(input)) return 'over';
+    return g.hover(input, player) === 'none' ? 'idle' : 'over';
+  }
+
+  /** Bubble labels and Squishy's speech bubble, placed over the 3D scene and kept inside the safe area. */
+  private updatePlaygroundUi(): void {
+    const labels: BubbleLabel[] = [];
+    for (const bub of this.playground.bubbles) {
+      if (!bub.label || bub.leaving || bub.popping || bub.scale.value < 0.5) continue;
+      const p = this.stage.worldToPixel(bub.x, bub.y - bub.drawRadius * 1.04);
+      labels.push({ key: bub.label, x: p.x, y: p.y, primary: bub.attention });
+    }
+    this.overlay.setBubbleLabels(labels, this.stage.safeRect);
+
+    const sp = this.playground.speech;
+    const c = sp ? this.game.creatures[sp.slot] : null;
+    if (sp && c?.alive) {
+      const top = c.y + 2 * BODY_BOTTOM * c.size * c.deform().d + c.size * 0.3;
+      const p = this.stage.worldToPixel(c.x, top);
+      const r = this.stage.safeRect;
+      const x = Math.min(Math.max(p.x, r.x + r.width * 0.15), r.x + r.width * 0.85);
+      const y = Math.min(Math.max(p.y, r.y + r.height * 0.18), r.y + r.height);
+      this.overlay.setSpeech(sp.key, x, y);
+    } else {
+      this.overlay.setSpeech(null);
+    }
   }
 
   private updatePrompts(dt: number, t: number, snap: InputSnapshot, active: boolean): void {
-    this.updateSnackHint(t, snap.present);
+    const pg = this.playground;
+    // One instruction at a time: the snack hint waits while a playground instruction is up.
+    this.updateSnackHint(t, snap.present && pg.mode === 'free' && !pg.coach);
     if (snap.present) {
       this.wasPresent = true;
       this.lostAt = null;
       if (active) this.interactMs += dt * 1000;
-      if (snap.pinchStart || this.interactMs > CONFIG.ui.instructionFadeAfterMs) this.instructionsDone = true;
+      if (snap.pinchStart || this.interactMs > CONFIG.ui.instructionFadeAfterMs || pg.inRound) this.instructionsDone = true;
       this.overlay.setHint(null);
-      this.overlay.setPrompt(this.instructionsDone ? 'none' : 'pinch');
+      if (!this.instructionsDone) this.overlay.setPrompt('pinch');
+      else if (pg.coach) this.overlay.setPrompt('coach', pg.coach);
+      else this.overlay.setPrompt('none');
+      pg.hintsBlocked = !this.instructionsDone || this.snackVisible;
       return;
     }
+    pg.hintsBlocked = true;
 
     if (this.wasPresent) {
       this.wasPresent = false;
@@ -270,7 +445,7 @@ export class App {
     }
     if (this.lostAt !== null && t - this.lostAt < CONFIG.activity.lostPromptMs) {
       this.overlay.setPrompt('none');
-      this.overlay.setHint('Show your hand again');
+      this.overlay.setHint('lost');
       return;
     }
     // Gone for a while: probably a new visitor next time, so show the full instructions again.
@@ -287,6 +462,7 @@ export class App {
       if (t >= this.snackStart + CONFIG.ui.snackHintMs) this.snackDone = true;
       else show = t >= this.snackStart && this.game.foods.some((f) => f.state === 'tray');
     }
+    this.snackVisible = show;
     if (!show) {
       this.overlay.setSnackHint(false);
       return;
@@ -298,6 +474,7 @@ export class App {
 
   /** No meaningful activity for a while: restore the default arrangement for the next visitor. */
   private handleInactivity(): void {
+    this.playground.reset();
     this.game.reset(true);
     this.pipeline.reset();
     this.resetGuidance();
@@ -315,7 +492,7 @@ export class App {
       this.panel.previewCanvas,
       this.tracker.running ? this.tracker.video : null,
       this.lastHands,
-      this.pipeline.selected,
+      this.pipeline.selectedAll,
       this.pipeline.mapper.mirror,
       this.pipeline.mapper.region,
       this.pipeline.debug.pinching,
@@ -325,11 +502,13 @@ export class App {
       const d = this.pipeline.debug;
       this.panel.setDebugText(
         [
-          `state: ${this.game.phase}   input: ${this.source}`,
-          `hands seen: ${d.hands}   tracking: ${d.tracking ? 'yes' : 'no'}`,
+          `state: ${this.game.phase}   input: ${this.source}   playground: ${this.playground.mode}${this.playground.current ? ` (${this.playground.current.id})` : ''}`,
+          `hands seen: ${d.hands}   tracking: ${d.tracking ? 'yes' : 'no'}   players: ${d.players}/${this.pipeline.selector.activeSlots}`,
           `pinch ratio: ${d.ratio === null ? '-' : d.ratio.toFixed(2)}  (pinch < ${CONFIG.pinch.pinchThreshold}, release > ${CONFIG.pinch.releaseThreshold})`,
           `pinching: ${d.pinching ? 'yes' : 'no'}   armed: ${d.armed ? 'yes' : 'no'}`,
           `inference: ${this.tracker.inferenceRate.toFixed(0)} Hz (${this.tracker.backendKind})   render: ${this.fps.toFixed(0)} fps`,
+          this.playground.memory.describe(),
+          this.outputLine(),
         ].join('\n'),
       );
     }
@@ -392,7 +571,8 @@ export class App {
 
   private setMouseMode(on: boolean): void {
     this.source = on ? 'mouse' : 'hand';
-    this.hub.reset();
+    for (const h of this.hubs) h.reset();
+    this.mouseHub = null;
     this.pipeline.reset();
     this.overlay.setMouseBadge(on);
   }
@@ -411,13 +591,31 @@ export class App {
   private applyReducedMotion(): void {
     const s = this.settings.reducedMotion;
     const reduced = s === 'on' || (s === 'auto' && this.reducedMotionQuery.matches);
+    this.reduced = reduced;
     this.game.setReducedMotion(reduced);
+    this.effects.setReducedMotion(reduced);
     document.documentElement.classList.toggle('reduced-motion', reduced);
+  }
+
+  /** Rendered frame size, with a warning when hologram mode is not producing portrait UHD. */
+  private outputLine(): string {
+    const { width, height } = this.stage.renderSize;
+    const line = `output: ${width} x ${height} px`;
+    if (this.stage.mode !== 'hologram') return line;
+    const h = CONFIG.hologram;
+    if (width === h.width && height === h.height) return `${line} (UHD portrait)`;
+    return `${line} (expected ${h.width} x ${h.height}: make the window fullscreen on the portrait display)`;
   }
 
   private handleResize(): void {
     this.stage.resize();
+    this.applyBounds();
+  }
+
+  /** New stage size or margins: creatures, food and bubbles all move back inside the safe area. */
+  private applyBounds(): void {
     this.game.setBounds(this.stage.bounds);
+    this.playground.layout(this.stage.bounds);
     this.updateSafeFrame();
   }
 
@@ -429,6 +627,16 @@ export class App {
       width: `${r.width}px`,
       height: `${r.height}px`,
     });
+    // Visitor buttons sit just inside the safe area.
+    const root = document.documentElement;
+    root.style.setProperty('--safe-right', `${Math.max(0, window.innerWidth - (r.x + r.width))}px`);
+    root.style.setProperty('--safe-bottom', `${Math.max(0, window.innerHeight - (r.y + r.height))}px`);
+    // Portrait: the tray is bottom-centre and would sit under the buttons. Raise them just above it.
+    const b = this.stage.bounds;
+    const portrait = r.height > r.width * 1.15;
+    const trayTop = this.stage.worldToPixel(b.trayX, b.trayY + b.foodRadius * 1.6).y;
+    root.style.setProperty('--controls-bottom', `${Math.max(0, window.innerHeight - trayTop + 8)}px`);
+    document.getElementById('visitor-controls')?.classList.toggle('is-raised', portrait);
   }
 
   private bindEvents(): void {
@@ -439,12 +647,15 @@ export class App {
       () => {
         if (document.hidden) {
           this.stop();
+          this.sound.setHidden(true);
           this.tracker.setPaused(true);
           // Coming back must not resume a half-finished pinch: reacquire with an open hand.
-          this.hub.reset();
+          for (const h of this.hubs) h.reset();
+          this.mouseHub = null;
           this.pipeline.reset();
         } else {
           this.tracker.setPaused(false);
+          this.sound.setHidden(false);
           this.start();
         }
       },
@@ -461,15 +672,19 @@ export class App {
     );
 
     // Pointer input: mouse test mode only. Touches are never used as input.
+    // Holding Shift moves player 2's cursor instead (two players on), to test playing together.
     const insidePanel = (e: Event) =>
-      e.target instanceof Element && !!e.target.closest('.op-panel, .op-toggle');
+      e.target instanceof Element && !!e.target.closest('.op-panel, .op-toggle, .visitor-controls');
+    const hubFor = (e: PointerEvent) =>
+      this.mouseHub ?? (e.shiftKey && this.settings.twoPlayers && this.hubs.length > 1 ? this.hubs[1] : this.hubs[0]);
     window.addEventListener(
       'pointermove',
       (e) => {
         if (this.source !== 'mouse' || e.pointerType === 'touch') return;
         const s = this.stage.pixelToSafe(e.clientX, e.clientY);
-        this.hub.setPresent(true);
-        this.hub.move(s.u, s.v, performance.now());
+        const hub = hubFor(e);
+        hub.setPresent(true);
+        hub.move(s.u, s.v, performance.now());
       },
       opts,
     );
@@ -482,24 +697,50 @@ export class App {
         }
         if (this.source !== 'mouse' || insidePanel(e) || e.button !== 0) return;
         const s = this.stage.pixelToSafe(e.clientX, e.clientY);
-        this.hub.setPresent(true);
-        this.hub.move(s.u, s.v, performance.now());
-        this.hub.setPinching(true);
-        this.hub.pinchStart();
+        const hub = hubFor(e);
+        // The same player keeps the pinch until the button is released, even if Shift changes.
+        this.mouseHub = hub;
+        hub.setPresent(true);
+        hub.move(s.u, s.v, performance.now());
+        hub.setPinching(true);
+        hub.pinchStart();
       },
       opts,
     );
     window.addEventListener(
       'pointerup',
       (e) => {
-        if (this.source === 'mouse' && e.pointerType !== 'touch') this.hub.setPinching(false);
+        if (this.source !== 'mouse' || e.pointerType === 'touch') return;
+        this.mouseHub?.setPinching(false);
+        this.mouseHub = null;
       },
       opts,
     );
+    // Sound was left on by a previous session: the first click or key press anywhere starts it
+    // (browsers block audio until then; webcam gestures do not count).
+    const unlockOnce = (e: Event) => {
+      if (e.target instanceof Element && e.target.closest('.visitor-controls')) return; // the button handles it
+      if (this.sound.state === 'locked') this.sound.unlock();
+    };
+    window.addEventListener('pointerdown', unlockOnce, opts);
+    window.addEventListener(
+      'keydown',
+      (e) => {
+        if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+        if (e.key === 'm' || e.key === 'M') {
+          if (e.repeat) return;
+          this.toggleSound();
+        } else {
+          unlockOnce(e);
+        }
+      },
+      opts,
+    );
+
     document.documentElement.addEventListener(
       'mouseleave',
       () => {
-        if (this.source === 'mouse') this.hub.setPresent(false);
+        if (this.source === 'mouse') for (const h of this.hubs) h.setPresent(false);
       },
       opts,
     );

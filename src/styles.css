@@ -10,6 +10,8 @@
   /* Visitor text scales with the display so it stays readable from a distance. */
   --title-size: clamp(28px, 4.6vmin, 72px);
   --sub-size: clamp(16px, 2.4vmin, 34px);
+  --label-size: clamp(14px, 2.2vmin, 32px);
+  --speech-size: clamp(18px, 3.2vmin, 48px);
 }
 
 * {
@@ -32,8 +34,17 @@ html[data-display='desktop'] body {
   background: var(--bg-desktop);
 }
 
-html[data-display='black'] body {
+html[data-display='black'] body,
+html[data-display='hologram'] body {
   background: #000;
+}
+
+/* The capsule is viewed from further away at 4K: let visitor text keep growing with the display. */
+html[data-display='hologram'] {
+  --title-size: clamp(28px, 4.6vmin, 160px);
+  --sub-size: clamp(16px, 2.4vmin, 80px);
+  --label-size: clamp(14px, 2.2vmin, 76px);
+  --speech-size: clamp(18px, 3.2vmin, 110px);
 }
 
 #app {
@@ -147,6 +158,28 @@ html.operator-open #safe-frame {
 
 .snack-hint.is-visible {
   opacity: 1;
+}
+
+/* Player 2: the same cursor in mint, so two players can tell their hands apart. */
+.cursor-p2 {
+  --accent: #5fe3c4;
+}
+
+.cursor-p2 .cursor-ring {
+  border-color: rgba(190, 255, 238, 0.9);
+  box-shadow: 0 0 18px rgba(95, 227, 196, 0.6);
+}
+
+.cursor-p2 .cursor-dot {
+  background: #c9fff1;
+}
+
+.cursor-p2.is-over .cursor-ring {
+  box-shadow: 0 0 26px rgba(95, 227, 196, 0.85);
+}
+
+.cursor-p2.is-feed .cursor-ring {
+  box-shadow: 0 0 34px rgba(95, 227, 196, 0.95);
 }
 
 .cursor.is-catch .cursor-ring {
@@ -350,8 +383,212 @@ html.operator-open #safe-frame {
   z-index: 2;
 }
 
-html[data-display='black'] .privacy-note {
+html[data-display='black'] .privacy-note,
+html[data-display='hologram'] .privacy-note {
   color: rgba(251, 243, 255, 0.38);
+}
+
+/* ---------------------------------------------------------------- visitor buttons (language, sound) */
+
+.visitor-controls {
+  --ctrl-font: clamp(14px, 1.7vmin, 22px);
+  position: absolute;
+  /* Inside the display safe area (set by the app), bottom-right, away from the food tray. */
+  right: calc(var(--safe-right, 12px) + 0.5em);
+  bottom: calc(var(--safe-bottom, 12px) + 0.5em);
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  font-size: var(--ctrl-font);
+  z-index: 8;
+}
+
+html[data-display='hologram'] .visitor-controls {
+  --ctrl-font: clamp(14px, 1.7vmin, 44px);
+}
+
+/* Portrait (the capsule): the snack tray sits bottom-centre, so the buttons move up beside the
+   floor instead of overlapping the tray. Set by the app from the tray's real position. */
+.visitor-controls.is-raised {
+  bottom: var(--controls-bottom);
+}
+
+.lang-switch {
+  display: flex;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  background: rgba(20, 14, 30, 0.55);
+  overflow: hidden;
+}
+
+.visitor-controls button {
+  font: inherit;
+  font-weight: 700;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  min-height: 2.4em;
+  min-width: 2.6em;
+  padding: 0.3em 0.75em;
+  cursor: pointer;
+  opacity: 0.8;
+}
+
+.visitor-controls button:hover,
+.visitor-controls button:focus-visible {
+  opacity: 1;
+}
+
+.visitor-controls button:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.lang-switch button[aria-pressed='true'] {
+  background: var(--accent);
+  color: #2a0820;
+  opacity: 1;
+}
+
+.visitor-controls .sound-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  background: rgba(20, 14, 30, 0.55);
+}
+
+.sound-icon {
+  width: 1.2em;
+  height: 1.2em;
+  flex: none;
+}
+
+.sound-icon .spk {
+  fill: currentColor;
+}
+
+.sound-icon .waves,
+.sound-icon .mute {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.visitor-controls[data-sound='off'] .waves,
+.visitor-controls[data-sound='unavailable'] .waves,
+.visitor-controls:not([data-sound='off']):not([data-sound='unavailable']) .mute {
+  display: none;
+}
+
+.visitor-controls[data-sound='locked'] .sound-toggle {
+  border-color: var(--accent);
+}
+
+/* ---------------------------------------------------------------- playground: labels, speech, coach */
+
+.bubble-labels {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.bubble-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  margin: 0;
+  padding: 0.25em 0.8em;
+  border-radius: 999px;
+  background: rgba(20, 14, 30, 0.72);
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  color: var(--text);
+  font-weight: 700;
+  font-size: var(--label-size);
+  white-space: nowrap;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.6);
+}
+
+.bubble-label.is-primary {
+  background: var(--accent);
+  border-color: #fff;
+  color: #2a0820;
+  text-shadow: none;
+  font-size: calc(var(--label-size) * 1.2);
+  box-shadow: 0 0 22px rgba(255, 122, 217, 0.6);
+}
+
+html[data-display='black'] .bubble-label:not(.is-primary),
+html[data-display='hologram'] .bubble-label:not(.is-primary) {
+  background: rgba(0, 0, 0, 0.6);
+}
+
+/* Squishy's speech bubble: big and short, so it reads from several metres away. */
+.speech {
+  position: absolute;
+  left: 0;
+  top: 0;
+  margin: 0;
+  padding: 0.3em 0.75em;
+  border-radius: 1em;
+  background: #fff;
+  color: #3a1640;
+  font-weight: 800;
+  font-size: var(--speech-size);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.25s ease;
+  z-index: 4;
+}
+
+.speech::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -0.38em;
+  margin-left: -0.4em;
+  border: 0.4em solid transparent;
+  border-top-color: #fff;
+  border-bottom: 0;
+}
+
+.speech.is-visible {
+  opacity: 1;
+}
+
+/* A new instruction gets a small, slow nudge (no flashing). */
+.prompt.is-new .prompt-title {
+  animation: coach-in 0.45s ease-out;
+}
+
+@keyframes coach-in {
+  0% {
+    transform: translateY(0.25em) scale(0.97);
+    opacity: 0.4;
+  }
+  100% {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+html.reduced-motion .prompt.is-new .prompt-title {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .prompt.is-new .prompt-title {
+    animation: none;
+  }
+}
+
+/* Welcome while Squishy greets: a soft glow on the title. */
+.prompt.is-greeting .prompt-title {
+  text-shadow: 0 2px 18px rgba(0, 0, 0, 0.6), 0 0 28px rgba(255, 122, 217, 0.55);
 }
 
 .mode-badge {
