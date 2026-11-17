@@ -84,8 +84,13 @@ export const CONFIG = {
      * the GPU on weaker machines. If GPU setup fails, CPU is used automatically.
      */
     delegate: 'GPU' as 'GPU' | 'CPU',
-    /** Detect up to this many hands so we can keep following the same one. Only one is ever used. */
+    /**
+     * Detect up to this many hands. With two players on, each followed hand is a player;
+     * with two players off, the extra detections only help keep following the same hand.
+     */
     maxHands: 2,
+    /** Most players (followed hands, one cursor each). The operator panel can limit this to one. */
+    maxPlayers: 2,
     minDetectionConfidence: 0.6,
     minPresenceConfidence: 0.6,
     minTrackingConfidence: 0.5,
@@ -179,6 +184,118 @@ export const CONFIG = {
     /** Merged size never exceeds this many main radii. */
     maxRadii: 1.15,
     durationMs: 450,
+    /** Never more than this many Squishies on screen (split makes exactly three). */
+    maxCreatures: 3,
+  },
+
+  /** Squishy's Playground: Free Play extras, Play Together mini-games and secret reactions. */
+  playground: {
+    /** "Play with me" appears this long after a visitor starts playing (or right after their first pinch). */
+    inviteAfterMs: 3500,
+    /** Squishy glances at the "Play with me" bubble this often in Free Play. */
+    inviteGlanceMs: 14000,
+    /** Bubble sizes in main radii (hit areas are at least hit.minHitFraction). */
+    playBubbleRadii: 0.62,
+    smallBubbleRadii: 0.42,
+    /** Bubble hit area relative to its drawn radius (generous for hand tracking). */
+    bubbleHitScale: 1.2,
+    /** After a round: the choice stays up this long, then Free Play resumes on its own. */
+    betweenMs: 12000,
+    /** A round ends gently (back to Free Play) when no hand has been seen for this long. */
+    abandonMs: 9000,
+    celebrateMs: 2600,
+    /** Squishy Says: sequence lengths per level, and timing of each light-up step. */
+    says: {
+      levels: [1, 2, 3],
+      lookMs: 550,
+      litMs: 750,
+      gapMs: 300,
+      /** No answer for this long: show the sequence again. */
+      replayAfterMs: 12000,
+    },
+    /** Snack Surprise: snacks asked for per round, and how long each effect plays. */
+    snack: {
+      requests: 3,
+      effectMs: 2600,
+    },
+    /** Bubble Bounce: target sizes (main radii) for each pop in a round, largest first. */
+    bounce: {
+      targetRadii: [1.45, 1.2, 1.0],
+      /** The bubble pops when the body centre comes within (radius + this x body size). */
+      hitPadSizes: 0.45,
+    },
+    /** Merge Magic: how long a special look lasts. */
+    magicMs: 12000,
+    /** Petting: open hand moving back and forth slowly above the head. */
+    pet: {
+      /** Zone above the head, in body sizes. */
+      zoneHalfWidthSizes: 1.25,
+      zoneLowSizes: 0.35,
+      zoneHighSizes: 2.4,
+      /** A stroke must travel at least this far (body sizes) before turning back. */
+      minStrokeSizes: 0.3,
+      /** Strokes faster than this (body sizes per second) are a hand passing by, not petting. */
+      maxSpeedSizes: 9,
+      /** Direction changes needed within strokeWindowMs before petting starts. */
+      reversalsToStart: 2,
+      strokeWindowMs: 2600,
+      /** Petting continues this long after the last stroke. */
+      lingerMs: 900,
+    },
+    /** Secret reactions and their cooldowns. */
+    secrets: {
+      dizzyMinBounces: 3,
+      dizzyMinImpact: 0.7,
+      dizzyCooldownMs: 25000,
+      heartAfterPetMs: 2200,
+      heartCooldownMs: 18000,
+      giggleStretch: 0.3,
+      giggleHoldMs: 1500,
+      giggleCooldownMs: 25000,
+    },
+    /** Particle bursts are kept small; reduced motion halves them. */
+    burstParticles: 10,
+    /**
+     * Squishy's memory (Free Play only): moods that build up over a session. Kept in memory
+     * only; nothing about visitors is stored.
+     */
+    memory: {
+      /** Hunger (0..1) at start and after an operator reset: a little peckish. */
+      startHunger: 0.5,
+      /** Seconds for hunger to rise from 0 to 1 while someone is playing. */
+      hungerRiseS: 90,
+      /** Each snack lowers hunger by this much (a favourite snack counts a bit more). */
+      feedSatisfies: 0.25,
+      favouriteBonus: 0.1,
+      /** At or above this, Squishy asks for food now and then. */
+      hungryAt: 0.65,
+      /**
+       * At or below this after a snack, Squishy is full and politely refuses snacks, until hunger
+       * climbs back to fullUntil (about 18 s at the rise rate above).
+       */
+      fullAt: 0.02,
+      fullUntil: 0.2,
+      /** Seconds between "I'm hungry!" reminders. */
+      hungerNagS: 14,
+      /** Seconds of petting that make Squishy doze off. */
+      petToSleepS: 6,
+      /** Sleepiness fades this much per second when not being petted. */
+      sleepDecayPerS: 0.06,
+      /** A dozing Squishy wakes up by itself after this long. */
+      sleepMaxS: 9,
+      /** Seconds between snore bubbles while asleep. */
+      snoreEveryS: 1.6,
+      /** Fondness gained per snack, per second of petting and per toss (0..1 scale, per visitor). */
+      fondFeed: 0.2,
+      fondPetPerS: 0.06,
+      fondToss: 0.05,
+      /** At or above this, Squishy considers the visitor a friend: no more dodging, follows the hand. */
+      friendAt: 0.6,
+      /** A friend who comes back within this long gets a "You're back!". */
+      welcomeBackMs: 12000,
+      /** Snacks of one kind needed before it becomes the favourite. */
+      favouriteAfter: 2,
+    },
   },
 
   /** Splitting (operator demonstration only). */
@@ -229,6 +346,53 @@ export const CONFIG = {
     snackHintMs: 6000,
   },
 
+  /**
+   * Welcoming idle greeting: after no hand has been seen for greetDelayMs, Squishy plays a short
+   * visual-only greeting (wiggle, curious look, happy face) for greetMs, then rests for pauseMs.
+   */
+  idle: {
+    greetDelayMs: 4000,
+    greetMs: 2600,
+    pauseMs: 7000,
+    /** Wiggle amplitude (radians of lean) and speed; reduced motion uses the smaller values. */
+    wiggleLean: 0.14,
+    wiggleHz: 2.4,
+    reducedWiggleLean: 0.04,
+    reducedWiggleHz: 1.1,
+  },
+
+  /** Playful sound effects (Web Audio, synthesized locally). Muted until the visitor or operator turns them on. */
+  sound: {
+    /** Overall volume (0..1). Kept low: these are gentle cues, not music. */
+    masterVolume: 0.22,
+    /** At most this many tones play at once; extra sounds are skipped. */
+    maxVoices: 6,
+    /** Minimum time between two plays of the same sound. */
+    minIntervalMs: {
+      grab: 90,
+      drop: 140,
+      throw: 160,
+      bounce: 120,
+      feed: 260,
+      merge: 320,
+      select: 120,
+      chime: 60,
+      pop: 120,
+      oops: 400,
+      cheer: 800,
+      hello: 1500,
+      purr: 900,
+      hiccup: 250,
+      sparkle: 400,
+      nope: 400,
+      giggle: 600,
+      dizzy: 800,
+    },
+    /** Bounces quieter than this (0..1) are silent; at most bouncesPerSecond bounce sounds per second. */
+    minBounceStrength: 0.12,
+    bouncesPerSecond: 4,
+  },
+
   /** Rendering. */
   render: {
     maxPixelRatio: 1.75,
@@ -236,6 +400,28 @@ export const CONFIG = {
     maxFps: 60,
     /** Clamp large frame gaps (e.g. after a tab switch) so animations never jump. */
     maxDeltaSeconds: 0.1,
+  },
+
+  /**
+   * Hologram capsule mode: pure black (black reads as empty space in the capsule), a native
+   * UHD frame and a soft glow so the creature looks lit from within and floats.
+   */
+  hologram: {
+    /** Output frame in device pixels (portrait UHD). The long window edge is rendered at height. */
+    width: 2160,
+    height: 3840,
+    /** Bloom glow. Raise strength for more halo; raise threshold so only the brightest parts glow. */
+    bloomStrength: 0.4,
+    bloomRadius: 0.35,
+    bloomThreshold: 0.88,
+    /** Brighter self-glow and fresnel rim so the silhouette holds up against black. */
+    emissiveStrength: 0.12,
+    rimStrength: 0.8,
+    /** Rim light intensity (desktop uses 1.6). */
+    rimLight: 2.2,
+    exposure: 1.0,
+    /** Food tray colour (the desktop lavender blooms into a white disc on black). */
+    trayColor: '#5b4a80',
   },
 
   /** Reduced-motion overrides (applied when the OS asks for it, or the operator forces it). */

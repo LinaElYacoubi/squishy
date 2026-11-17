@@ -18,7 +18,8 @@ export function drawSetupPreview(
   canvas: HTMLCanvasElement,
   video: HTMLVideoElement | null,
   hands: readonly (readonly Point3[])[],
-  selected: readonly Point3[] | null,
+  /** Each player's followed hand (index = player), or null. */
+  selected: readonly (readonly Point3[] | null)[],
   mirror: boolean,
   region: InputRegion,
   pinching: boolean,
@@ -52,9 +53,13 @@ export function drawSetupPreview(
   ctx.strokeRect(x0 * w, region.yMin * h, (x1 - x0) * w, (region.yMax - region.yMin) * h);
   ctx.setLineDash([]);
 
+  // Player 1 pink, player 2 mint (matching the visitor cursors).
+  const colors = ['#ff7ad9', '#5fe3c4'];
   for (const hand of hands) {
-    const isSelected = hand === selected;
-    ctx.strokeStyle = isSelected ? '#ff7ad9' : 'rgba(255,255,255,0.45)';
+    const player = selected.indexOf(hand);
+    const isSelected = player >= 0;
+    const color = colors[player] ?? colors[0];
+    ctx.strokeStyle = isSelected ? color : 'rgba(255,255,255,0.45)';
     ctx.lineWidth = isSelected ? 3 : 2;
     ctx.beginPath();
     for (const [a, b] of CONNECTIONS) {
@@ -64,7 +69,7 @@ export function drawSetupPreview(
     ctx.stroke();
     if (isSelected) {
       for (const i of [4, 8]) {
-        ctx.fillStyle = pinching ? '#ff7ad9' : '#ffffff';
+        ctx.fillStyle = pinching && player === 0 ? color : '#ffffff';
         ctx.beginPath();
         ctx.arc((1 - hand[i].x) * w, hand[i].y * h, 5, 0, Math.PI * 2);
         ctx.fill();

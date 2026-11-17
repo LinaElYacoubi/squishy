@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { approach } from '../game/anim';
 import { BODY_BOTTOM, type CreatureModel, type Expression } from '../game/creatureModel';
+import { LOOKS } from '../game/playground/mergeMagic';
 import type { CreatureAssets } from './assets';
 
 interface Eye {
@@ -9,6 +10,7 @@ interface Eye {
   pupil: THREE.Mesh;
   sparkle: THREE.Mesh;
   arc: THREE.Mesh;
+  spiral: THREE.Mesh;
   ux: number;
   uy: number;
   p: THREE.Vector3;
@@ -21,6 +23,11 @@ const EXPRESSIONS: Record<Expression, { eye: number; pupil: number; o: number; s
   happy: { eye: 1, pupil: 1, o: 0, smile: 1.35 },
   cheeky: { eye: 1, pupil: 1, o: 0, smile: 1.4 },
   hungry: { eye: 1.15, pupil: 1.15, o: 1.45, smile: 0 },
+  dizzy: { eye: 1.12, pupil: 0, o: 0.7, smile: 0 },
+  content: { eye: 1, pupil: 1, o: 0, smile: 1.15 },
+  goofy: { eye: 1.15, pupil: 0.85, o: 0, smile: 1.45 },
+  excited: { eye: 1.25, pupil: 1.2, o: 0.8, smile: 0.9 },
+  sleepy: { eye: 0.9, pupil: 1, o: 0.35, smile: 0 },
 };
 
 /**
@@ -49,6 +56,7 @@ export class JellyView {
   private cheekPoints = [surfacePoint(-0.56, -0.04), surfacePoint(0.56, -0.04)];
   private expr = { ...EXPRESSIONS.neutral };
   private tmpColor = new THREE.Color();
+  private magicColor = new THREE.Color();
 
   constructor(
     assets: CreatureAssets,
@@ -80,9 +88,13 @@ export class JellyView {
       const arc = new THREE.Mesh(assets.smile, assets.pupil);
       arc.scale.setScalar(1.25);
       arc.position.set(0, -0.15, 0.45);
-      group.add(white, pupil, sparkle, arc);
+      // Dizzy eyes: a spiral drawn on the eye white.
+      const spiral = new THREE.Mesh(assets.spiral, assets.pupil);
+      spiral.position.set(0, 0, 0.5);
+      spiral.visible = false;
+      group.add(white, pupil, sparkle, arc, spiral);
       this.root.add(group);
-      this.eyes.push({ group, white, pupil, sparkle, arc, ux, uy: 0.2, p: surfacePoint(ux, 0.2) });
+      this.eyes.push({ group, white, pupil, sparkle, arc, spiral, ux, uy: 0.2, p: surfacePoint(ux, 0.2) });
     }
 
     this.smile = new THREE.Mesh(assets.smile, assets.mouth);
@@ -118,7 +130,7 @@ export class JellyView {
     this.shadow.visible = visible && showShadow;
     if (!visible) return;
 
-    // Colour, blended toward the last food eaten.
+    // Colour, blended toward the last food eaten, then toward a Merge Magic look.
     const k = m.tintAmount;
     this.tmpColor.setRGB(
       m.color[0] + (m.tint[0] - m.color[0]) * k,
@@ -126,14 +138,27 @@ export class JellyView {
       m.color[2] + (m.tint[2] - m.color[2]) * k,
       THREE.SRGBColorSpace,
     );
+    const magic = m.magicAmount;
+    if (m.magic && magic > 0) this.tmpColor.lerp(this.magicColor.set(LOOKS[m.magic].color), magic * 0.85);
     this.material.color.copy(this.tmpColor);
     this.material.emissive.copy(this.tmpColor);
 
     const D = m.deform();
+    // Petting relaxes the body into a slightly lower, wider shape (visual only).
+    if (m.relax > 0) {
+      const squat = 1 - 0.06 * m.relax;
+      const widen = 1 / Math.sqrt(squat);
+      D.a *= widen;
+      D.b *= squat;
+      D.c *= widen;
+      D.d *= squat;
+    }
     const centerY = size * BODY_BOTTOM * D.d;
 
-    this.root.position.set(m.x + Math.sin(time * 45) * m.shiver * size, m.y, 0);
-    this.root.rotation.z = m.lean.value;
+    // The idle greeting (m.greet) is a visual-only offset on top of the model.
+    const greet = m.greet;
+    this.root.position.set(m.x + Math.sin(time * 45) * m.shiver * size, m.y + greet.bob * size, 0);
+    this.root.rotation.z = m.lean.value + greet.lean + m.wiggleLean;
     // prettier-ignore
     this.bodyGroup.matrix.set(
       D.a * size, D.b * size, 0, 0,
@@ -143,7 +168,8 @@ export class JellyView {
     );
     this.bodyGroup.matrixWorldNeedsUpdate = true;
 
-    const target = EXPRESSIONS[m.expression];
+    const expression = greet.expression ?? m.expression;
+    const target = EXPRESSIONS[expression];
     const e = this.expr;
     e.eye = approach(e.eye, target.eye, 14, dt);
     e.pupil = approach(e.pupil, target.pupil, 14, dt);
@@ -165,9 +191,17 @@ export class JellyView {
     // Eyes: attached to the deformed surface, deforming only partly so they stay readable.
     const eyeSquashX = 1 + (D.a - 1) * 0.4;
     const eyeSquashY = 1 + (D.d - 1) * 0.4;
-    const closedHappy = m.expression === 'happy' && m.blink > 0.5;
-    const lookX = m.expression === 'surprised' ? m.lookX * 0.3 : m.lookX;
-    const lookY = m.expression === 'surprised' ? m.lookY * 0.3 : m.lookY;
+    // A greeting smile closes the eyes into happy arcs without waiting for the model's blink.
+    // Asleep: always closed.
+    const closedHappy =
+      expression === 'sleepy' ||
+      ((expression === 'happy' || expression === 'content') && (m.blink > 0.5 || greet.expression === 'happy'));
+    const dizzy = expression === 'dizzy';
+    const goofy = expression === 'goofy';
+    const ownLookX = m.lookX + (greet.lookX - m.lookX) * greet.lookMix;
+    const ownLookY = m.lookY + (greet.lookY - m.lookY) * greet.lookMix;
+    const lookX = expression === 'surprised' ? ownLookX * 0.3 : ownLookX;
+    const lookY = expression === 'surprised' ? ownLookY * 0.3 : ownLookY;
     for (const eye of this.eyes) {
       place(eye.group, eye.p, 0.05);
       eye.group.rotation.set(-eye.uy * 0.4, eye.ux * 0.55, 0);
@@ -179,7 +213,12 @@ export class JellyView {
       eye.white.scale.set(1, open, 0.55);
       eye.pupil.visible = !closedHappy && m.blink < 0.7;
       eye.pupil.scale.set(0.55 * e.pupil, 0.62 * e.pupil * open, 0.22);
-      eye.pupil.position.set(lookX * 0.33, lookY * 0.28 * open, 0.46);
+      // Goofy: the pupils cross toward the nose.
+      const cross = goofy ? -Math.sign(eye.ux) * 0.26 : 0;
+      eye.pupil.position.set(goofy ? cross : lookX * 0.33, goofy ? 0.05 : lookY * 0.28 * open, 0.46);
+      eye.pupil.visible &&= !dizzy;
+      eye.spiral.visible = dizzy && !closedHappy;
+      if (dizzy) eye.spiral.rotation.z = time * (eye.ux < 0 ? 5 : -5);
       eye.sparkle.visible = eye.pupil.visible;
       eye.sparkle.scale.setScalar(0.17 * Math.min(1, e.pupil + 0.2));
       eye.sparkle.position.set(eye.pupil.position.x + 0.17, eye.pupil.position.y + 0.22 * open, 0.62);
@@ -190,6 +229,8 @@ export class JellyView {
     place(this.smile, this.mouthPoint, 0.02);
     const smileS = size * 0.17;
     this.smile.visible = smile > 0.05;
+    // A lopsided grin when goofy.
+    this.smile.rotation.z = Math.PI + (goofy ? 0.28 : 0);
     this.smile.scale.set(smileS * Math.max(0.05, smile), smileS * Math.max(0.05, Math.min(1.2, smile)), smileS);
     place(this.mouthO, this.mouthPoint, 0.03);
     this.mouthO.visible = mouthO > 0.05;
@@ -197,7 +238,9 @@ export class JellyView {
 
     this.cheekPoints.forEach((p, i) => {
       place(this.cheeks[i], p, -0.01);
-      this.cheeks[i].scale.set(size * 0.12 * D.a, size * 0.075 * D.d, 1);
+      // Rosier, bigger cheeks while being petted.
+      const blush = 1 + 0.45 * m.relax;
+      this.cheeks[i].scale.set(size * 0.12 * D.a * blush, size * 0.075 * D.d * blush, 1);
     });
 
     if (showShadow) {

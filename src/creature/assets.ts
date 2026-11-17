@@ -2,6 +2,9 @@ import * as THREE from 'three';
 import { CONFIG } from '../config';
 import { BODY_BOTTOM } from '../game/creatureModel';
 
+/** Fresnel rim strength outside hologram mode. */
+const RIM_STRENGTH = 0.55;
+
 /**
  * Geometry, materials and textures shared by every creature, created once and reused.
  * Everything is procedural: no model files are needed.
@@ -12,6 +15,8 @@ export class CreatureAssets {
   readonly smile: THREE.TorusGeometry;
   readonly disc: THREE.CircleGeometry;
   readonly plane: THREE.PlaneGeometry;
+  /** Flat spiral for dizzy eyes. */
+  readonly spiral: THREE.TubeGeometry;
 
   readonly eyeWhite: THREE.MeshStandardMaterial;
   readonly pupil: THREE.MeshStandardMaterial;
@@ -25,7 +30,7 @@ export class CreatureAssets {
 
   private rimUniforms = {
     uRimColor: { value: new THREE.Color('#ffe3f6') },
-    uRimStrength: { value: 0.55 },
+    uRimStrength: { value: RIM_STRENGTH },
   };
 
   constructor() {
@@ -35,6 +40,7 @@ export class CreatureAssets {
     this.smile = new THREE.TorusGeometry(0.5, 0.11, 8, 24, Math.PI);
     this.disc = new THREE.CircleGeometry(1, 28);
     this.plane = new THREE.PlaneGeometry(1, 1);
+    this.spiral = new THREE.TubeGeometry(new SpiralCurve(), 72, 0.055, 6, false);
 
     this.eyeWhite = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.25, emissive: '#ffffff', emissiveIntensity: 0.12 });
     this.pupil = new THREE.MeshStandardMaterial({ color: '#1d1030', roughness: 0.15, metalness: 0 });
@@ -78,12 +84,33 @@ export class CreatureAssets {
     return mat;
   }
 
+  /** Stronger self-glow and rim for the hologram capsule, so the body reads against pure black. */
+  setHologram(on: boolean): void {
+    const h = CONFIG.hologram;
+    this.rimUniforms.uRimStrength.value = on ? h.rimStrength : RIM_STRENGTH;
+    for (const m of this.bodyMaterials) m.emissiveIntensity = on ? h.emissiveStrength : CONFIG.creature.emissiveStrength;
+  }
+
   dispose(): void {
-    for (const g of [this.body, this.sphere, this.smile, this.disc, this.plane]) g.dispose();
+    for (const g of [this.body, this.sphere, this.smile, this.disc, this.plane, this.spiral]) g.dispose();
     for (const m of [this.eyeWhite, this.pupil, this.sparkle, this.mouth, this.highlight, this.cheek, ...this.bodyMaterials]) {
       m.dispose();
     }
     this.shadowTexture.dispose();
+  }
+}
+
+/** Two and a bit turns, growing outward, in the eye's plane. */
+class SpiralCurve extends THREE.Curve<THREE.Vector3> {
+  // The base constructor is protected in the typings.
+  constructor() {
+    super();
+  }
+
+  override getPoint(t: number, target = new THREE.Vector3()): THREE.Vector3 {
+    const a = t * Math.PI * 2 * 2.25;
+    const r = 0.06 + 0.36 * t;
+    return target.set(Math.cos(a) * r, Math.sin(a) * r, 0);
   }
 }
 

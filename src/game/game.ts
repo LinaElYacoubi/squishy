@@ -1,6 +1,6 @@
 import { CONFIG } from '../config';
 import { approach, clamp, easeInOut, lerp } from './anim';
-import { BODY_BOTTOM, CreatureModel, hexToRgb, type RGB } from './creatureModel';
+import { BODY_BOTTOM, CreatureModel, hexToRgb, type Launch, type RGB } from './creatureModel';
 import { FOOD_KINDS, FoodModel } from './food';
 import { estimateThrowVelocity, type ThrowSettings, type TimedPoint } from './throw';
 
@@ -55,11 +55,33 @@ export type GamePhase = 'idle' | 'attentive' | 'grabbing' | 'holding-food' | 'sp
 export type HoverKind = 'none' | 'food' | 'creature';
 
 export interface GameEvents {
-  onGrab?: (kind: 'creature' | 'food') => void;
-  onRelease?: (kind: 'drop' | 'throw' | 'lost') => void;
-  onFeed?: () => void;
-  onMerge?: () => void;
+  /** `player` is the index of the hand that grabbed (0 = player 1). */
+  onGrab?: (kind: 'creature' | 'food', player: number) => void;
+  onRelease?: (kind: 'drop' | 'throw' | 'lost', c?: CreatureModel) => void;
+  onFeed?: (f?: FoodModel, c?: CreatureModel) => void;
+  /**
+   * Food was released at a mouth. Return 'refuse' to have the creature turn it down (the food
+   * glides back to the tray). Defaults to eating it.
+   */
+  onOffer?: (f: FoodModel, c: CreatureModel) => 'eat' | 'refuse';
+  /** A thrown or dropped creature hit the floor or a wall. strength is 0..1 (relative to the max throw speed). */
+  onBounce?: (strength: number, c?: CreatureModel) => void;
+  /** An airborne creature came to rest. `launch` says how it got airborne (null: merge, split). */
+  onLand?: (c: CreatureModel, launch: Launch) => void;
+  /** `survivor` keeps the merged body; `absorbed` disappeared into it. */
+  onMerge?: (survivor?: CreatureModel, absorbed?: CreatureModel) => void;
   onSplit?: () => void;
+  /**
+   * Called every frame after gameplay has set animation targets and before the creatures'
+   * springs advance, so the playground can override looks, leans and expressions.
+   */
+  beforeAnimate?: (dt: number) => void;
+}
+
+/** What the visitor may pick up right now (mini-games lock some of it). */
+export interface GrabLocks {
+  creatures: boolean;
+  food: boolean;
 }
 
 /** The single interaction a visitor can have at a time. A grabbed target is kept until release. */
@@ -85,6 +107,8 @@ type Sequence =
     };
 
 const NONE: Interaction = { kind: 'none' };
+/** Most players the game keeps interactions for (one per followed hand). */
+export const MAX_PLAYERS: number = CONFIG.tracking.maxPlayers;
 const SLOT_COLORS: RGB[] = [CONFIG.creature.mainColor, ...CONFIG.creature.miniColors].map(hexToRgb);
 /** Three minis together have the volume of one main creature. */
 const MINI_FACTOR = 1 / Math.cbrt(3);
@@ -97,6 +121,8 @@ const SPLIT_END_S = 0.82;
  *   pinch over a creature -> grab and stretch; release slowly to drop, quickly to throw;
  *                           release a small one over another to merge them
  * Splitting is an operator demonstration (startSplit), never a visitor gesture.
+ * Each player (followed hand) has their own interaction, so two players can each hold something
+ * at the same time. A held creature or snack can't be taken by the other player.
  * Rendering-agnostic: it only updates CreatureModel and FoodModel data.
  */
 export class Game {
@@ -105,16 +131,22 @@ export class Game {
   events: GameEvents = {};
   /** Operator option: the default arrangement is three small Squishies instead of one. */
   startWithMinis = false;
-  /** Creature that would eat the held food if released now (for feedback). */
-  feedTarget: CreatureModel | null = null;
+  /** Per player: the creature that would eat that player's held food if released now (for feedback). */
+  readonly feedTargets: (CreatureModel | null)[] = Array.from({ length: MAX_PLAYERS }, () => null);
   /** Seconds since start. */
   time = 0;
   /** Diagnostics counters. */
   stats = { grabs: 0, throws: 0, feeds: 0, merges: 0 };
+  /** Mini-games can lock grabbing creatures or food. Both are allowed in Free Play. */
+  allow: GrabLocks = { creatures: true, food: true };
+  /** Playful dodging (Free Play only: mini-games switch it off so targets stay put). */
+  dodgeEnabled = true;
+  /** Most creatures that may be on screen at once (split never exceeds it). */
+  readonly maxCreatures: number = CONFIG.merge.maxCreatures;
 
   private b: StageBounds;
   private reduced = false;
-  private interaction: Interaction = NONE;
+  private interactions: Interaction[] = Array.from({ length: MAX_PLAYERS }, () => NONE);
   private sequence: Sequence | null = null;
   private lastActive = false;
 
@@ -150,12 +182,40 @@ export class Game {
     return this.creatures.filter((c) => c.alive);
   }
 
+  /** The first held creature (any player). */
   get grabbed(): CreatureModel | null {
-    return this.interaction.kind === 'creature' ? this.interaction.c : null;
+    return this.grabbedAll[0] ?? null;
   }
 
+  /** Every held creature. */
+  get grabbedAll(): CreatureModel[] {
+    return this.interactions.flatMap((it) => (it.kind === 'creature' ? [it.c] : []));
+  }
+
+  /** The first held snack (any player). */
   get heldFood(): FoodModel | null {
-    return this.interaction.kind === 'food' ? this.interaction.f : null;
+    for (const it of this.interactions) if (it.kind === 'food') return it.f;
+    return null;
+  }
+
+  /** Creature that would eat a held snack if released now (first player holding food over a mouth). */
+  get feedTarget(): CreatureModel | null {
+    return this.feedTargets.find((c) => c !== null) ?? null;
+  }
+
+  grabbedBy(player: number): CreatureModel | null {
+    const it = this.interactions[player];
+    return it?.kind === 'creature' ? it.c : null;
+  }
+
+  heldFoodBy(player: number): FoodModel | null {
+    const it = this.interactions[player];
+    return it?.kind === 'food' ? it.f : null;
+  }
+
+  /** This player holds nothing. */
+  isFree(player: number): boolean {
+    return (this.interactions[player]?.kind ?? 'none') === 'none';
   }
 
   get busy(): boolean {
@@ -164,8 +224,8 @@ export class Game {
 
   get phase(): GamePhase {
     if (this.sequence) return this.sequence.kind === 'split' ? 'splitting' : 'merging';
-    if (this.interaction.kind === 'creature') return 'grabbing';
-    if (this.interaction.kind === 'food') return 'holding-food';
+    if (this.interactions.some((it) => it.kind === 'creature')) return 'grabbing';
+    if (this.interactions.some((it) => it.kind === 'food')) return 'holding-food';
     return this.lastActive ? 'attentive' : 'idle';
   }
 
@@ -192,10 +252,10 @@ export class Game {
    * pending timer. `gentle` makes the creatures pop back in instead of appearing instantly.
    * Never creates loops or listeners.
    */
-  reset(gentle = false): void {
-    this.interaction = NONE;
+  reset(gentle = false, single = false): void {
+    this.interactions.fill(NONE);
     this.sequence = null;
-    this.feedTarget = null;
+    this.feedTargets.fill(null);
     for (const c of this.creatures) {
       c.clearEffects();
       c.alive = false;
@@ -212,7 +272,7 @@ export class Game {
       c.grow.target = 1;
       c.nextIdleAt = c.clock + 3 + this.rng() * 3;
     };
-    if (this.startWithMinis) {
+    if (this.startWithMinis && !single) {
       const f = this.miniFactor(1);
       const spacing = f * this.b.mainRadius * 2.5;
       for (let k = 0; k < 3; k++) spawn(this.creatures[k + 1], f, this.homeX + (k - 1) * spacing);
@@ -244,11 +304,11 @@ export class Game {
     }
   }
 
-  /** What a pinch at the cursor would pick up right now (cursor feedback). */
-  hover(input: GameInput): HoverKind {
-    if (!input.present || this.interaction.kind !== 'none' || this.sequence) return 'none';
-    if (this.pickFood([input])) return 'food';
-    if (this.pickCreature([input])) return 'creature';
+  /** What a pinch at this player's cursor would pick up right now (cursor feedback). */
+  hover(input: GameInput, player = 0): HoverKind {
+    if (!input.present || !this.isFree(player) || this.sequence) return 'none';
+    if (this.allow.food && this.pickFood([input])) return 'food';
+    if (this.allow.creatures && this.pickCreature([input])) return 'creature';
     return 'none';
   }
 
@@ -269,9 +329,9 @@ export class Game {
    * Returns false (and does nothing) if that is not possible right now.
    */
   startSplit(): boolean {
-    if (this.sequence || this.interaction.kind !== 'none') return false;
+    if (!this.calm) return false;
     const alive = this.alive;
-    if (alive.length !== 1 || alive[0].motion !== 'free') return false;
+    if (alive.length !== 1 || alive[0].motion !== 'free' || this.maxCreatures < 3) return false;
     const src = alive[0];
     src.cancelHop();
     src.motion = 'splitting';
@@ -283,42 +343,55 @@ export class Game {
     return true;
   }
 
-  update(rawDt: number, input: GameInput): void {
+  /** One step. Pass one input per player (index = player); a single input means player 1 only. */
+  update(rawDt: number, inputs: GameInput | readonly GameInput[]): void {
     const dt = clamp(rawDt, 0, CONFIG.render.maxDeltaSeconds);
     this.time += dt;
-    const cursor = input.present && input.active ? input : null;
-    this.lastActive = cursor !== null;
-    if (input.acquired) this.acquiredAt = this.time;
+    const list: readonly GameInput[] = Array.isArray(inputs) ? inputs : [inputs as GameInput];
+    const input = (p: number) => list[p] ?? NO_INPUT;
+    const players = this.interactions.length;
+    const cursors = list.filter((i) => i.present && i.active);
+    this.lastActive = cursors.length > 0;
+    if (list.some((i) => i.acquired)) this.acquiredAt = this.time;
 
-    // 1. End the current interaction: hand lost, pinch released, or a new pinch already began.
-    if (this.interaction.kind !== 'none') {
-      if (!input.present) this.release(input, 'lost');
-      else if (!input.pinching || input.pinchStart) this.release(input, 'release');
+    // 1. End each player's interaction: hand lost, pinch released, or a new pinch already began.
+    for (let p = 0; p < players; p++) {
+      if (this.interactions[p].kind === 'none') continue;
+      const inp = input(p);
+      if (!inp.present) this.release(p, inp, 'lost');
+      else if (!inp.pinching || inp.pinchStart) this.release(p, inp, 'release');
     }
 
-    // 2. Start a new one. Priority: food, then creature, then nothing.
-    if (input.pinchStart && input.present && this.interaction.kind === 'none' && !this.sequence) {
-      this.tryGrab(input);
+    // 2. Start new ones. Priority: food, then creature, then nothing.
+    for (let p = 0; p < players; p++) {
+      const inp = input(p);
+      if (inp.pinchStart && inp.present && this.interactions[p].kind === 'none' && !this.sequence) this.tryGrab(p, inp);
     }
 
-    // 3. Continue the current interaction.
-    this.feedTarget = null;
-    if (this.interaction.kind === 'creature') this.updateGrab(dt, input);
-    else if (this.interaction.kind === 'food') this.updateHeldFood(dt, input);
+    // 3. Continue each interaction.
+    for (let p = 0; p < players; p++) {
+      this.feedTargets[p] = null;
+      const it = this.interactions[p];
+      if (it.kind === 'creature') this.updateGrab(dt, it, input(p));
+      else if (it.kind === 'food') this.updateHeldFood(dt, p, it.f, input(p));
+    }
 
     // 4. Scripted sequences.
     if (this.sequence?.kind === 'split') this.updateSplit(dt);
     else if (this.sequence?.kind === 'merge') this.updateMerge();
 
-    // 5. Autonomous behaviour and physics for everything not held.
-    if (this.interaction.kind === 'none' && cursor && !input.pinching && !this.sequence) this.updateDodge(cursor);
+    // 5. Autonomous behaviour and physics for everything not held. Dodging follows the first
+    // open, active hand, and only while nobody holds anything.
+    const dodger = cursors.find((c) => !c.pinching);
+    if (this.dodgeEnabled && this.calm && dodger) this.updateDodge(dodger);
     for (const c of this.alive) {
-      if (c.motion === 'free') this.updateFree(dt, c, cursor);
+      if (c.motion === 'free') this.updateFree(dt, c, cursors);
       else if (c.motion === 'airborne') this.updatePhysics(dt, c);
     }
     this.separateGrounded(dt);
     for (const f of this.foods) this.updateFood(dt, f);
 
+    this.events.beforeAnimate?.(dt);
     for (const c of this.creatures) c.update(dt);
     for (const f of this.foods) f.update(dt);
   }
@@ -359,20 +432,22 @@ export class Game {
     return best;
   }
 
-  private tryGrab(input: GameInput): void {
+  private tryGrab(player: number, input: GameInput): void {
     const points = this.recentPoints(input);
-    const food = this.pickFood(points);
+    const food = this.allow.food ? this.pickFood(points) : null;
     if (food) {
       food.setState('held');
-      this.interaction = { kind: 'food', f: food, startedAt: this.time };
+      this.interactions[player] = { kind: 'food', f: food, startedAt: this.time };
       this.resetDodge();
-      this.events.onGrab?.('food');
+      this.events.onGrab?.('food', player);
       return;
     }
-    const c = this.pickCreature(points);
+    const c = this.allow.creatures ? this.pickCreature(points) : null;
     if (!c) return;
     c.cancelHop();
     c.motion = 'grabbed';
+    c.launch = null;
+    c.heldFor = 0;
     const s = c.size;
     let gx = (input.x - c.x) / s;
     let gy = (input.y - c.centerY) / s;
@@ -382,18 +457,18 @@ export class Game {
       gx *= maxLen / len;
       gy *= maxLen / len;
     }
-    this.interaction = { kind: 'creature', c, gx, gy, startedAt: this.time };
+    this.interactions[player] = { kind: 'creature', c, gx, gy, startedAt: this.time };
     c.react('surprised', 0.3);
     c.kick(4);
     c.shiver = 0.025;
     this.resetDodge();
     this.stats.grabs++;
-    this.events.onGrab?.('creature');
+    this.events.onGrab?.('creature', player);
   }
 
-  private updateGrab(dt: number, input: GameInput): void {
-    if (this.interaction.kind !== 'creature') return;
-    const { c, gx, gy } = this.interaction;
+  private updateGrab(dt: number, it: Extract<Interaction, { kind: 'creature' }>, input: GameInput): void {
+    const { c, gx, gy } = it;
+    c.heldFor += dt;
     const g = CONFIG.grab;
     const b = this.b;
     const s = c.size;
@@ -443,14 +518,14 @@ export class Game {
     c.baseExpression = c.stretch.value > 0.35 ? 'cheeky' : 'curious';
   }
 
-  private release(input: GameInput, why: 'release' | 'lost'): void {
-    const it = this.interaction;
-    this.interaction = NONE;
+  private release(player: number, input: GameInput, why: 'release' | 'lost'): void {
+    const it = this.interactions[player];
+    this.interactions[player] = NONE;
 
     if (it.kind === 'food') {
       it.f.feedReady = false;
       const target = why === 'release' ? this.findFeedTarget(it.f) : null;
-      if (target) this.feed(it.f, target);
+      if (target && (this.events.onOffer?.(it.f, target) ?? 'eat') === 'eat') this.feed(it.f, target);
       else this.returnFood(it.f);
       return;
     }
@@ -461,10 +536,13 @@ export class Game {
     c.lean.target = 0;
     c.motion = 'airborne';
     c.baseExpression = 'neutral';
+    c.bounces = 0;
+    c.hardestImpact = 0;
     if (why === 'lost') {
       // Hand lost: a gentle drop, never a throw.
       c.vx = c.vy = 0;
-      this.events.onRelease?.('lost');
+      c.launch = 'lost';
+      this.events.onRelease?.('lost', c);
       return;
     }
 
@@ -473,8 +551,9 @@ export class Game {
       c.vx = v.x;
       c.vy = v.y;
       c.react('surprised', 0.3);
+      c.launch = 'throw';
       this.stats.throws++;
-      this.events.onRelease?.('throw');
+      this.events.onRelease?.('throw', c);
       return;
     }
 
@@ -488,12 +567,13 @@ export class Game {
     }
     const wasStretched = Math.abs(c.stretch.value) > 0.15;
     c.vx = c.vy = 0;
+    c.launch = 'drop';
     if (wasStretched) {
       // It noticed being stretched: a blink, then a look along where it was pulled.
       c.surpriseBlink();
       c.holdLook(c.stretchAxisX * 0.7, c.stretchAxisY * 0.7, 0.9);
     }
-    this.events.onRelease?.('drop');
+    this.events.onRelease?.('drop', c);
   }
 
   private throwSettings(): ThrowSettings {
@@ -519,14 +599,12 @@ export class Game {
     }
   }
 
-  private updateHeldFood(dt: number, input: GameInput): void {
-    if (this.interaction.kind !== 'food') return;
-    const f = this.interaction.f;
+  private updateHeldFood(dt: number, player: number, f: FoodModel, input: GameInput): void {
     const r = this.b.foodRadius;
     f.x = approach(f.x, clamp(input.x, this.b.left + r, this.b.right - r), 28, dt);
     f.y = approach(f.y, clamp(input.y, this.b.bottom + r, this.b.top - r), 28, dt);
-    this.feedTarget = this.findFeedTarget(f);
-    f.feedReady = this.feedTarget !== null;
+    this.feedTargets[player] = this.findFeedTarget(f);
+    f.feedReady = this.feedTargets[player] !== null;
   }
 
   /** The eligible creature whose mouth is closest to the food, within its feeding zone. */
@@ -562,7 +640,7 @@ export class Game {
     c.setTint(f.color, fc.tintAmount, fc.tintFadeMs / 1000);
     c.puff.velocity += fc.puffKick * (this.reduced ? CONFIG.reducedMotion.wobbleScale : 1);
     this.stats.feeds++;
-    this.events.onFeed?.();
+    this.events.onFeed?.(f, c);
   }
 
   private returnFood(f: FoodModel): void {
@@ -605,16 +683,19 @@ export class Game {
 
   // ---------------------------------------------------------------- free behaviour and physics
 
-  private updateFree(dt: number, c: CreatureModel, cursor: { x: number; y: number } | null): void {
+  private updateFree(dt: number, c: CreatureModel, cursors: readonly { x: number; y: number }[]): void {
     if (!c.isHopping) c.y = approach(c.y, this.b.floorY, 12, dt);
-    const food = this.heldFood;
+    // Watch the nearest held snack, else the nearest hand.
+    const foods = this.interactions.flatMap((it) => (it.kind === 'food' ? [it.f] : []));
+    const food = nearest(foods, c);
     if (food) {
       // Watch the food. Open the mouth when it is close enough to eat.
       c.lookAt(food.x, food.y);
-      c.baseExpression = this.feedTarget === c ? 'hungry' : 'curious';
+      c.baseExpression = this.feedTargets.includes(c) ? 'hungry' : 'curious';
       c.lean.target = -clamp((food.x - c.x) / (c.radius * 4), -1, 1) * 0.12;
       return;
     }
+    const cursor = nearest(cursors, c);
     if (cursor) {
       c.lookAt(cursor.x, cursor.y);
       c.lean.target = -clamp((cursor.x - c.x) / (c.radius * 4), -1, 1) * 0.12;
@@ -687,6 +768,9 @@ export class Game {
           c.motion = 'free';
           c.squash.target = 1;
           c.nextIdleAt = c.clock + 3;
+          const launch = c.launch;
+          c.launch = null;
+          this.events.onLand?.(c, launch);
         }
       }
     }
@@ -702,6 +786,12 @@ export class Game {
     // Floor: vertical squash. Wall: horizontal squash (vertical stretch).
     c.kick(where === 'floor' ? -k : k * 0.8);
     if (speed > CONFIG.throw.surpriseImpactRadii * R) c.surpriseBlink();
+    if (speed >= CONFIG.throw.settleSpeedRadii * R) {
+      const strength = clamp(speed / (CONFIG.throw.maxSpeedRadii * R), 0, 1);
+      c.bounces++;
+      c.hardestImpact = Math.max(c.hardestImpact, strength);
+      this.events.onBounce?.(strength, c);
+    }
   }
 
   /** Keep resting creatures from piling up on each other (they only merge on purpose). */
@@ -742,7 +832,9 @@ export class Game {
       this.cursorNear = false;
     }
 
-    const near = dist < d.triggerRadii * c.radius;
+    // A hand hovering above the head is probably about to pet: never hop away from it.
+    const aboveHead = cursor.y > c.centerY + c.size * 0.45 && Math.abs(cursor.x - c.x) < c.size * 1.3;
+    const near = dist < d.triggerRadii * c.radius && !aboveHead;
     if (near) this.lastNearAt = this.time;
     else if (this.time - this.lastNearAt > d.streakResetMs / 1000) this.dodgeStreak = 0;
 
@@ -798,6 +890,31 @@ export class Game {
 
   private hopAnticipation(): number {
     return this.reduced ? 0.18 : 0.12;
+  }
+
+  /** A resting creature hops back to the middle (used when a mini-game starts). */
+  sendHome(): void {
+    for (const c of this.alive) {
+      if (c.motion !== 'free' || c.isHopping || Math.abs(c.x - this.homeX) < c.radius * 0.2) continue;
+      c.startHop(this.homeX, this.b.floorY, c.radius * 0.5, this.hopDuration() * 1.4, this.hopAnticipation());
+    }
+  }
+
+  /** Small celebratory hop in place. */
+  hopInPlace(c: CreatureModel, height = 0.45): void {
+    if (c.motion !== 'free' || c.isHopping) return;
+    const h = c.radius * height * (this.reduced ? CONFIG.reducedMotion.hopHeightScale : 1);
+    c.startHop(c.x, this.b.floorY, h, this.hopDuration(), this.hopAnticipation());
+    c.nextIdleAt = c.clock + 4;
+  }
+
+  /** Nothing is held and no scripted sequence runs. */
+  get calm(): boolean {
+    return this.interactions.every((it) => it.kind === 'none') && !this.sequence;
+  }
+
+  get reducedMotion(): boolean {
+    return this.reduced;
   }
 
   // ---------------------------------------------------------------- split and merge
@@ -930,8 +1047,21 @@ export class Game {
     a.grow.snap(0);
     this.sequence = null;
     this.stats.merges++;
-    this.events.onMerge?.();
+    this.events.onMerge?.(b, a);
   }
+}
+
+function nearest<T extends { x: number; y: number }>(list: readonly T[], c: CreatureModel): T | null {
+  let best: T | null = null;
+  let bestD = Infinity;
+  for (const p of list) {
+    const d = Math.hypot(p.x - c.x, p.y - c.centerY);
+    if (d < bestD) {
+      best = p;
+      bestD = d;
+    }
+  }
+  return best;
 }
 
 function minDistance(points: readonly { x: number; y: number }[], x: number, y: number): number {
